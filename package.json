@@ -1,0 +1,23 @@
+{
+  "name": "c2-ai-command-center",
+  "version": "0.1.0",
+  "description": "C2 AI Command Center — orchestrates multiple AI agent sessions with strict security isolation, shared memory, inter-agent communication, and centralized policy enforcement",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest --run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "uuid": "11.1.0",
+    "ws": "8.18.1"
+  },
+  "devDependencies": {
+    "@types/uuid": "10.0.0",
+    "@types/ws": "8.18.1",
+    "fast-check": "3.23.2",
+    "typescript": "5.7.3",
+    "vitest": "3.1.4"
+  }
+}
