@@ -4,7 +4,8 @@ export type EventChannel =
   | 'session:state'
   | 'audit:stream'
   | 'agent:messages'
-  | `session:${string}`;
+  | `session:${string}`
+  | `task:${string}`;
 
 export interface WebSocketMessage {
   type: 'command' | 'subscribe' | 'unsubscribe' | 'ping';

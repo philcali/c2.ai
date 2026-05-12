@@ -1,0 +1,251 @@
+/* TaskCard — collapsible task status card embedded in chat */
+
+.taskCard {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-border-primary);
+  border-radius: var(--radius-md);
+  background-color: var(--color-bg-secondary);
+  overflow: hidden;
+  font-family: var(--font-sans);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+/* ---- Header ---- */
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 0.15s;
+}
+
+.header:hover {
+  background-color: var(--color-bg-hover);
+}
+
+.header:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+
+.expandIcon {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  transition: transform 0.2s;
+}
+
+.expandIconExpanded {
+  transform: rotate(90deg);
+}
+
+.headerInfo {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.titleRow {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  min-width: 0;
+}
+
+.statusBadge {
+  flex-shrink: 0;
+  display: inline-block;
+  padding: 1px var(--spacing-xs);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  border-radius: var(--radius-sm);
+  line-height: 1.4;
+}
+
+.statusPending {
+  background-color: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
+}
+
+.statusInProgress {
+  background-color: var(--color-accent);
+  color: var(--color-accent-text);
+}
+
+.statusCompleted {
+  background-color: var(--color-success);
+  color: var(--color-text-inverse);
+}
+
+.statusFailed {
+  background-color: var(--color-error);
+  color: var(--color-text-inverse);
+}
+
+.statusCanceled {
+  background-color: var(--color-warning);
+  color: var(--color-text-inverse);
+}
+
+.agentId {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stepPosition {
+  font-size: 0.75rem;
+  color: var(--color-text-tertiary);
+}
+
+/* ---- Current step summary (always visible) ---- */
+
+.currentStep {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-xs) var(--spacing-md) var(--spacing-sm);
+  border-top: 1px solid var(--color-border-secondary);
+}
+
+.currentStepInstruction {
+  font-size: 0.8125rem;
+  color: var(--color-text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.currentStepMeta {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+}
+
+/* ---- Progress indicator ---- */
+
+.progressIndicator {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  font-size: 0.75rem;
+  color: var(--color-accent);
+  font-weight: 500;
+}
+
+.spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--color-border-secondary);
+  border-top-color: var(--color-accent);
+  border-radius: var(--radius-full);
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---- Expanded step list ---- */
+
+.stepList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--color-border-secondary);
+}
+
+.stepItem {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-xs) var(--spacing-md);
+  border-bottom: 1px solid var(--color-border-secondary);
+  font-size: 0.8125rem;
+}
+
+.stepItem:last-child {
+  border-bottom: none;
+}
+
+.stepIndex {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  border-radius: var(--radius-full);
+  background-color: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
+}
+
+.stepIndexCurrent {
+  background-color: var(--color-accent);
+  color: var(--color-accent-text);
+}
+
+.stepIndexCompleted {
+  background-color: var(--color-success);
+  color: var(--color-text-inverse);
+}
+
+.stepIndexFailed {
+  background-color: var(--color-error);
+  color: var(--color-text-inverse);
+}
+
+.stepContent {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.stepInstruction {
+  color: var(--color-text-primary);
+  word-break: break-word;
+}
+
+.stepStatus {
+  font-size: 0.6875rem;
+  color: var(--color-text-tertiary);
+  text-transform: capitalize;
+}
+
+/* ---- Terminal state card borders ---- */
+
+.terminalCompleted {
+  border-color: var(--color-success);
+}
+
+.terminalFailed {
+  border-color: var(--color-error);
+}
+
+.terminalCanceled {
+  border-color: var(--color-warning);
+}

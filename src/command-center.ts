@@ -20,7 +20,17 @@ import {
   type OperatorCredentials,
   type RouteRequest,
 } from './subsystems/operator-interface.js';
+import { AgentConnector } from './subsystems/agent-connector.js';
+import { TaskOrchestrator } from './subsystems/task-orchestrator.js';
 import type { ACPAgentCard, ACPTaskSubmission } from './interfaces/acp-adapter.js';
+import type { AgentConnectionConfig } from './interfaces/agent-connector.js';
+import type {
+  CodingTaskSubmission,
+  CodingTaskStatus,
+  TaskStepDefinition,
+  ArtifactQuery,
+  ExternalEventPayload,
+} from './interfaces/task-orchestrator.js';
 
 // ------------------------------------------------------------------
 // Configuration
@@ -42,6 +52,15 @@ export interface CommandCenterConfig {
    * Defaults to rejecting all tokens.
    */
   authenticate?: AuthenticateFn;
+  /**
+   * Allowed CORS origins for the HTTP API.
+   *
+   * - `'*'` allows any origin (convenient for local development).
+   * - A string like `'http://localhost:5173'` allows a single origin.
+   * - An array of strings allows multiple specific origins.
+   * - `undefined` (default) disables CORS headers entirely.
+   */
+  corsOrigins?: string | string[];
 }
 
 // ------------------------------------------------------------------
@@ -86,6 +105,8 @@ export class CommandCenter {
   private readonly _acpAdapter: ACPAdapter;
   private readonly _agentCPBridge: AgentCPBridge;
   private readonly _operatorInterface: OperatorInterface;
+  private readonly _agentConnector: AgentConnector;
+  private readonly _taskOrchestrator: TaskOrchestrator;
 
   // ------------------------------------------------------------------
   // Server state
@@ -93,6 +114,7 @@ export class CommandCenter {
 
   private readonly port: number;
   private readonly authenticate: AuthenticateFn;
+  private readonly corsOrigins: string | string[] | undefined;
   private httpServer: HttpServer | null = null;
   private wss: WebSocketServer | null = null;
   private running = false;
@@ -105,6 +127,7 @@ export class CommandCenter {
     this.port = config.port ?? 8080;
     const authenticate = config.authenticate ?? DEFAULT_AUTHENTICATE;
     this.authenticate = authenticate;
+    this.corsOrigins = config.corsOrigins;
 
     // 1. Foundation subsystems (no dependencies)
     this._auditLog = new AuditLog();
@@ -167,6 +190,30 @@ export class CommandCenter {
       authenticate,
       heartbeatIntervalMs: config.heartbeatIntervalMs,
     });
+
+    // 6. Agent Connector (protocol-agnostic adapter layer)
+    this._agentConnector = new AgentConnector({
+      sessionManager: this._sessionManager,
+      discoveryRegistry: this._agentDiscoveryRegistry,
+      policyEngine: this._policyEngine,
+      agentcpBridge: this._agentCPBridge,
+      communicationBus: this._communicationBus,
+      acpAdapter: this._acpAdapter,
+      antiLeakage: this._antiLeakage,
+      auditLog: this._auditLog,
+    });
+
+    // 7. Task Orchestrator (depends on Agent Connector and most subsystems)
+    this._taskOrchestrator = new TaskOrchestrator({
+      agentConnector: this._agentConnector,
+      memoryStore: this._memoryStore,
+      policyEngine: this._policyEngine,
+      mcpGateway: this._mcpGateway,
+      auditLog: this._auditLog,
+      operatorInterface: this._operatorInterface,
+      discoveryRegistry: this._agentDiscoveryRegistry,
+      sessionManager: this._sessionManager,
+    });
   }
 
   // ------------------------------------------------------------------
@@ -228,14 +275,33 @@ export class CommandCenter {
     // 1. Shut down the Operator Interface (closes WS connections, heartbeat).
     this._operatorInterface.shutdown();
 
-    // 2. Terminate all active agent sessions.
+    // 2. Cancel all active coding tasks.
+    const activeTasks = this._taskOrchestrator.listTasks({ status: 'in_progress' as CodingTaskStatus });
+    const pendingTasks = this._taskOrchestrator.listTasks({ status: 'pending' as CodingTaskStatus });
+    const cancelPromises = [...activeTasks, ...pendingTasks].map((task) =>
+      this._taskOrchestrator.cancelTask(task.id, 'Command Center shutting down', task.operatorId).catch(() => {
+        // Best-effort — task may already be in a terminal state.
+      }),
+    );
+    await Promise.all(cancelPromises);
+
+    // 3. Disconnect all connected agents.
+    const connectedAgents = this._agentConnector.listAgents();
+    const disconnectPromises = connectedAgents.map((agent) =>
+      this._agentConnector.disconnect(agent.agentId, 'Command Center shutting down').catch(() => {
+        // Best-effort — agent may already be disconnected.
+      }),
+    );
+    await Promise.all(disconnectPromises);
+
+    // 4. Terminate all active agent sessions.
     const sessions = this._sessionManager.listSessions();
     const terminationPromises = sessions
       .filter((s) => s.state === 'running' || s.state === 'paused')
       .map((s) => this._sessionManager.terminateSession(s.id, 'Command Center shutting down'));
     await Promise.all(terminationPromises);
 
-    // 3. Close the WebSocket server.
+    // 5. Close the WebSocket server.
     if (this.wss) {
       await new Promise<void>((resolve) => {
         this.wss!.close(() => {
@@ -245,7 +311,7 @@ export class CommandCenter {
       this.wss = null;
     }
 
-    // 4. Close the HTTP server.
+    // 6. Close the HTTP server.
     if (this.httpServer) {
       await new Promise<void>((resolve) => {
         this.httpServer!.close(() => {
@@ -277,6 +343,41 @@ export class CommandCenter {
     const baseUrl = `http://${req.headers.host ?? 'localhost'}`;
     const parsedUrl = new URL(req.url ?? '/', baseUrl);
 
+    // ---- CORS ----
+    if (this.corsOrigins !== undefined) {
+      const requestOrigin = req.headers.origin ?? '';
+      let allowedOrigin: string | undefined;
+
+      if (this.corsOrigins === '*') {
+        allowedOrigin = '*';
+      } else if (typeof this.corsOrigins === 'string') {
+        if (requestOrigin === this.corsOrigins) {
+          allowedOrigin = requestOrigin;
+        }
+      } else if (Array.isArray(this.corsOrigins)) {
+        if (this.corsOrigins.includes(requestOrigin)) {
+          allowedOrigin = requestOrigin;
+        }
+      }
+
+      if (allowedOrigin) {
+        res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+        res.setHeader('Access-Control-Max-Age', '86400');
+        if (allowedOrigin !== '*') {
+          res.setHeader('Vary', 'Origin');
+        }
+      }
+
+      // Handle preflight requests.
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+    }
+
     // Parse query parameters.
     const query: Record<string, string> = {};
     for (const [key, value] of parsedUrl.searchParams.entries()) {
@@ -287,6 +388,45 @@ export class CommandCenter {
     let body: unknown = undefined;
     if (req.method && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
       body = await this.readRequestBody(req);
+    }
+
+    const method = req.method ?? 'GET';
+    const path = parsedUrl.pathname;
+
+    // Handle the login endpoint before the auth check — this is the
+    // only unauthenticated route.  The client sends { token } and we
+    // validate it through the same authenticate callback used for
+    // Bearer tokens on every other request.
+    if (path === '/api/auth/login' && method === 'POST') {
+      const tokenValue =
+        body && typeof body === 'object' && 'token' in body
+          ? (body as Record<string, unknown>).token
+          : undefined;
+
+      if (typeof tokenValue !== 'string' || !tokenValue) {
+        this.sendJsonResponse(res, 400, {
+          error: { code: 'BAD_REQUEST', message: 'Request body must include a "token" string' },
+        });
+        return;
+      }
+
+      const creds = this.authenticate(tokenValue);
+      if (!creds) {
+        this.sendJsonResponse(res, 401, {
+          error: { code: 'AUTHENTICATION_FAILURE', message: 'Invalid token' },
+        });
+        return;
+      }
+
+      // Return the validated token and operator identity.  The
+      // expiresAt field is set to 24 hours from now — callers can
+      // treat this as a session lifetime.
+      this.sendJsonResponse(res, 200, {
+        token: tokenValue,
+        operatorId: creds.operatorId,
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+      });
+      return;
     }
 
     // Extract and validate the Bearer token from the Authorization header.
@@ -309,12 +449,16 @@ export class CommandCenter {
       return;
     }
 
-    const method = req.method ?? 'GET';
-    const path = parsedUrl.pathname;
-
     // Check if this is an ACP route (handle BEFORE operator interface routes).
-    if (path.startsWith('/agents') || path.startsWith('/tasks')) {
+    if (path.startsWith('/agents') || (path.startsWith('/tasks') && !path.startsWith('/tasks/coding'))) {
       await this.handleAcpRequest(method, path, body, operatorId, req, res);
+      return;
+    }
+
+    // Check if this is a coding task management route.
+    if (path.startsWith('/tasks/coding') || path.startsWith('/coding-tasks') || path.startsWith('/agent-connections')
+      || path.startsWith('/api/tasks') || path.startsWith('/api/coding-tasks') || path.startsWith('/api/agent-connections')) {
+      await this.handleTaskManagementRequest(method, path, body, operatorId, res);
       return;
     }
 
@@ -505,6 +649,248 @@ export class CommandCenter {
     }
   }
 
+  // ------------------------------------------------------------------
+  // Internal — Task management request handling
+  // ------------------------------------------------------------------
+
+  /**
+   * Handle task management and agent connection REST endpoints.
+   *
+   * Coding Task routes:
+   *  - POST   /coding-tasks                    — Create a coding task
+   *  - GET    /coding-tasks                    — List coding tasks
+   *  - GET    /coding-tasks/:id                — Get a coding task
+   *  - POST   /coding-tasks/:id/dispatch       — Dispatch current step
+   *  - POST   /coding-tasks/:id/advance        — Advance to next step
+   *  - POST   /coding-tasks/:id/retry          — Retry current step
+   *  - POST   /coding-tasks/:id/redirect       — Redirect task steps
+   *  - POST   /coding-tasks/:id/cancel         — Cancel a task
+   *  - POST   /coding-tasks/:id/interrupt      — Interrupt current step
+   *  - GET    /coding-tasks/:id/artifacts      — Query artifacts
+   *  - POST   /coding-tasks/:id/events         — Handle external event
+   *
+   * Agent Connection routes:
+   *  - POST   /agent-connections               — Connect an agent
+   *  - GET    /agent-connections               — List connected agents
+   *  - DELETE /agent-connections/:id           — Disconnect an agent
+   *
+   * Requirements: 2.1, 2.4, 2.5, 2.6, 2.8, 5.5, 8.3
+   */
+  private async handleTaskManagementRequest(
+    method: string,
+    path: string,
+    body: unknown,
+    operatorId: string,
+    res: ServerResponse,
+  ): Promise<void> {
+    // Normalize: strip /api prefix so route patterns work uniformly.
+    // Also map /tasks/ to /coding-tasks/ for UI compatibility.
+    let normalizedPath = path.startsWith('/api/') ? path.slice(4) : path;
+    if (normalizedPath.startsWith('/tasks/') || normalizedPath === '/tasks') {
+      normalizedPath = normalizedPath.replace(/^\/tasks/, '/coding-tasks');
+    }
+
+    try {
+      // --- Agent Connection routes ---
+
+      // POST /agent-connections — Connect an agent
+      if (normalizedPath === '/agent-connections' && method === 'POST') {
+        const config = body as AgentConnectionConfig;
+        if (!config?.agentId || !config?.protocol || !config?.manifest) {
+          this.sendJsonResponse(res, 400, {
+            error: { code: 'VALIDATION_ERROR', message: 'Request body must include agentId, protocol, and manifest' },
+          });
+          return;
+        }
+        config.operatorId = operatorId;
+        const agent = await this._agentConnector.connect(config);
+        this.sendJsonResponse(res, 201, { data: agent });
+        return;
+      }
+
+      // GET /agent-connections — List connected agents
+      if (normalizedPath === '/agent-connections' && method === 'GET') {
+        const agents = this._agentConnector.listAgents();
+        this.sendJsonResponse(res, 200, { data: agents });
+        return;
+      }
+
+      // DELETE /agent-connections/:id — Disconnect an agent
+      if (normalizedPath.match(/^\/agent-connections\/[^/]+$/) && method === 'DELETE') {
+        const agentId = decodeURIComponent(normalizedPath.slice('/agent-connections/'.length));
+        const disconnectBody = body as { reason?: string } | undefined;
+        const reason = disconnectBody?.reason ?? 'Disconnected by operator';
+        await this._agentConnector.disconnect(agentId, reason);
+        this.sendJsonResponse(res, 200, { data: { agentId, disconnected: true } });
+        return;
+      }
+
+      // --- Coding Task routes ---
+
+      // POST /coding-tasks/:id/dispatch — Dispatch current step (check before POST /coding-tasks)
+      if (normalizedPath.match(/^\/coding-tasks\/[^/]+\/dispatch$/) && method === 'POST') {
+        const taskId = this.extractPathParam(normalizedPath, '/coding-tasks/', '/dispatch');
+        await this._taskOrchestrator.dispatchCurrentStep(taskId);
+        this.sendJsonResponse(res, 200, { data: { taskId, dispatched: true } });
+        return;
+      }
+
+      // POST /coding-tasks/:id/advance — Advance to next step
+      if (normalizedPath.match(/^\/coding-tasks\/[^/]+\/advance$/) && method === 'POST') {
+        const taskId = this.extractPathParam(normalizedPath, '/coding-tasks/', '/advance');
+        await this._taskOrchestrator.advanceTask(taskId, operatorId);
+        this.sendJsonResponse(res, 200, { data: { taskId, advanced: true } });
+        return;
+      }
+
+      // POST /coding-tasks/:id/retry — Retry current step
+      if (normalizedPath.match(/^\/coding-tasks\/[^/]+\/retry$/) && method === 'POST') {
+        const taskId = this.extractPathParam(normalizedPath, '/coding-tasks/', '/retry');
+        const retryBody = body as { feedback?: string } | undefined;
+        const feedback = retryBody?.feedback ?? '';
+        await this._taskOrchestrator.retryStep(taskId, feedback, operatorId);
+        this.sendJsonResponse(res, 200, { data: { taskId, retried: true } });
+        return;
+      }
+
+      // POST /coding-tasks/:id/redirect — Redirect task steps
+      if (normalizedPath.match(/^\/coding-tasks\/[^/]+\/redirect$/) && method === 'POST') {
+        const taskId = this.extractPathParam(normalizedPath, '/coding-tasks/', '/redirect');
+        const redirectBody = body as { steps?: TaskStepDefinition[]; fromIndex?: number } | undefined;
+        if (!redirectBody?.steps || redirectBody.fromIndex === undefined) {
+          this.sendJsonResponse(res, 400, {
+            error: { code: 'VALIDATION_ERROR', message: 'Request body must include steps and fromIndex' },
+          });
+          return;
+        }
+        await this._taskOrchestrator.redirectTask(taskId, redirectBody.steps, redirectBody.fromIndex, operatorId);
+        this.sendJsonResponse(res, 200, { data: { taskId, redirected: true } });
+        return;
+      }
+
+      // POST /coding-tasks/:id/cancel — Cancel a task
+      if (normalizedPath.match(/^\/coding-tasks\/[^/]+\/cancel$/) && method === 'POST') {
+        const taskId = this.extractPathParam(normalizedPath, '/coding-tasks/', '/cancel');
+        const cancelBody = body as { reason?: string } | undefined;
+        const reason = cancelBody?.reason ?? 'Canceled by operator';
+        await this._taskOrchestrator.cancelTask(taskId, reason, operatorId);
+        this.sendJsonResponse(res, 200, { data: { taskId, canceled: true } });
+        return;
+      }
+
+      // POST /coding-tasks/:id/interrupt — Interrupt current step
+      if (normalizedPath.match(/^\/coding-tasks\/[^/]+\/interrupt$/) && method === 'POST') {
+        const taskId = this.extractPathParam(normalizedPath, '/coding-tasks/', '/interrupt');
+        await this._taskOrchestrator.interruptStep(taskId, operatorId);
+        this.sendJsonResponse(res, 200, { data: { taskId, interrupted: true } });
+        return;
+      }
+
+      // POST /coding-tasks/:id/events — Handle external event
+      if (normalizedPath.match(/^\/coding-tasks\/[^/]+\/events$/) && method === 'POST') {
+        const taskId = this.extractPathParam(normalizedPath, '/coding-tasks/', '/events');
+        const eventBody = body as { stepId?: string; event?: ExternalEventPayload } | undefined;
+        if (!eventBody?.stepId || !eventBody?.event) {
+          this.sendJsonResponse(res, 400, {
+            error: { code: 'VALIDATION_ERROR', message: 'Request body must include stepId and event' },
+          });
+          return;
+        }
+        await this._taskOrchestrator.handleExternalEvent(taskId, eventBody.stepId, eventBody.event);
+        this.sendJsonResponse(res, 200, { data: { taskId, eventHandled: true } });
+        return;
+      }
+
+      // GET /coding-tasks/:id/artifacts — Query artifacts
+      if (normalizedPath.match(/^\/coding-tasks\/[^/]+\/artifacts$/) && method === 'GET') {
+        const taskId = this.extractPathParam(normalizedPath, '/coding-tasks/', '/artifacts');
+        const query: ArtifactQuery = { taskId };
+        const artifacts = await this._taskOrchestrator.queryArtifacts(query);
+        this.sendJsonResponse(res, 200, { data: artifacts });
+        return;
+      }
+
+      // POST /coding-tasks — Create a coding task
+      if (normalizedPath === '/coding-tasks' && method === 'POST') {
+        const submission = body as CodingTaskSubmission;
+        if (!submission?.steps || !Array.isArray(submission.steps)) {
+          this.sendJsonResponse(res, 400, {
+            error: { code: 'VALIDATION_ERROR', message: 'Request body must include steps array' },
+          });
+          return;
+        }
+        submission.operatorId = operatorId;
+        const task = await this._taskOrchestrator.createTask(submission);
+        this.sendJsonResponse(res, 201, { data: task });
+        return;
+      }
+
+      // GET /coding-tasks — List coding tasks
+      if (normalizedPath === '/coding-tasks' && method === 'GET') {
+        const tasks = this._taskOrchestrator.listTasks({ operatorId });
+        this.sendJsonResponse(res, 200, { data: tasks });
+        return;
+      }
+
+      // GET /coding-tasks/:id — Get a coding task
+      if (normalizedPath.match(/^\/coding-tasks\/[^/]+$/) && method === 'GET') {
+        const taskId = normalizedPath.slice('/coding-tasks/'.length);
+        const task = this._taskOrchestrator.getTask(taskId);
+        if (!task) {
+          this.sendJsonResponse(res, 404, {
+            error: { code: 'RESOURCE_NOT_FOUND', message: `Coding task '${taskId}' not found` },
+          });
+          return;
+        }
+        this.sendJsonResponse(res, 200, { data: task });
+        return;
+      }
+
+      // No matching route — return 404.
+      this.sendJsonResponse(res, 404, {
+        error: { code: 'RESOURCE_NOT_FOUND', message: `Route not found: ${method} ${normalizedPath}` },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Internal error';
+
+      if (message.includes('not found')) {
+        this.sendJsonResponse(res, 404, {
+          error: { code: 'RESOURCE_NOT_FOUND', message },
+        });
+      } else if (message.includes('denied') || message.includes('authorization')) {
+        this.sendJsonResponse(res, 403, {
+          error: { code: 'AUTHZ_DENIED', message },
+        });
+      } else if (
+        message.includes('Cannot') ||
+        message.includes('Invalid') ||
+        message.includes('already connected') ||
+        message.includes('No capable agent') ||
+        message.includes('retry limit')
+      ) {
+        this.sendJsonResponse(res, 400, {
+          error: { code: 'VALIDATION_ERROR', message },
+        });
+      } else {
+        this.sendJsonResponse(res, 500, {
+          error: { code: 'INTERNAL_ERROR', message },
+        });
+      }
+    }
+  }
+
+  /**
+   * Extract a path parameter from a route path.
+   * e.g., extractPathParam('/coding-tasks/abc123/cancel', '/coding-tasks/', '/cancel') => 'abc123'
+   */
+  private extractPathParam(path: string, prefix: string, suffix?: string): string {
+    let value = path.slice(prefix.length);
+    if (suffix && value.endsWith(suffix)) {
+      value = value.slice(0, -suffix.length);
+    }
+    return decodeURIComponent(value);
+  }
+
   /**
    * Send a JSON response on the HTTP response object.
    */
@@ -600,6 +986,14 @@ export class CommandCenter {
 
   get operatorInterface(): OperatorInterface {
     return this._operatorInterface;
+  }
+
+  get agentConnector(): AgentConnector {
+    return this._agentConnector;
+  }
+
+  get taskOrchestrator(): TaskOrchestrator {
+    return this._taskOrchestrator;
   }
 
   /** Whether the Command Center is currently running. */

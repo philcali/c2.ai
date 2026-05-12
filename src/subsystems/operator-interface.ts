@@ -139,6 +139,9 @@ export class OperatorInterface implements IOperatorInterface {
   /** Active audit stream iterators that need cleanup. */
   private readonly auditStreamCleanups: Map<string, () => void> = new Map();
 
+  /** In-memory chat message storage per session. */
+  private readonly sessionMessages: Map<string, Array<{ type: string; id: string; content: string; timestamp: string }>> = new Map();
+
   constructor(options: {
     sessionManager: ISessionManager;
     policyEngine: IPolicyEngine;
@@ -638,55 +641,63 @@ export class OperatorInterface implements IOperatorInterface {
     const { method, path } = request;
 
     // Session lifecycle routes
-    if (path === '/sessions' && method === 'POST') {
+    if (path === '/api/sessions' && method === 'POST') {
       return this.handleCreateSession(request);
     }
-    if (path === '/sessions' && method === 'GET') {
+    if (path === '/api/sessions' && method === 'GET') {
       return this.handleListSessions(request);
     }
-    if (path.match(/^\/sessions\/[^/]+$/) && method === 'GET') {
+    if (path.match(/^\/api\/sessions\/[^/]+$/) && method === 'GET') {
       return this.handleGetSession(request);
     }
-    if (path.match(/^\/sessions\/[^/]+\/terminate$/) && method === 'POST') {
+    if (path.match(/^\/api\/sessions\/[^/]+\/terminate$/) && method === 'POST') {
       return this.handleTerminateSession(request);
     }
-    if (path.match(/^\/sessions\/[^/]+\/pause$/) && method === 'POST') {
+    if (path.match(/^\/api\/sessions\/[^/]+\/pause$/) && method === 'POST') {
       return this.handlePauseSession(request);
     }
-    if (path.match(/^\/sessions\/[^/]+\/resume$/) && method === 'POST') {
+    if (path.match(/^\/api\/sessions\/[^/]+\/resume$/) && method === 'POST') {
       return this.handleResumeSession(request);
     }
 
+    // Session message routes
+    if (path.match(/^\/api\/sessions\/[^/]+\/messages$/) && method === 'GET') {
+      return this.handleGetMessages(request);
+    }
+    if (path.match(/^\/api\/sessions\/[^/]+\/messages$/) && method === 'POST') {
+      return this.handlePostMessage(request);
+    }
+
     // Policy management routes
-    if (path === '/policies' && method === 'POST') {
+    if (path === '/api/policies' && method === 'POST') {
       return this.handleAddPolicy(request);
     }
-    if (path === '/policies' && method === 'GET') {
+    if (path === '/api/policies' && method === 'GET') {
       return this.handleListPolicies(request);
     }
-    if (path.match(/^\/policies\/[^/]+$/) && method === 'GET') {
+    if (path.match(/^\/api\/policies\/[^/]+$/) && method === 'GET') {
       return this.handleGetPolicy(request);
     }
-    if (path.match(/^\/policies\/[^/]+$/) && method === 'PUT') {
+    if (path.match(/^\/api\/policies\/[^/]+$/) && method === 'PUT') {
       return this.handleUpdatePolicy(request);
     }
-    if (path.match(/^\/policies\/[^/]+$/) && method === 'DELETE') {
+    if (path.match(/^\/api\/policies\/[^/]+$/) && method === 'DELETE') {
       return this.handleRemovePolicy(request);
     }
-    if (path.match(/^\/policies\/[^/]+\/rollback$/) && method === 'POST') {
+    if (path.match(/^\/api\/policies\/[^/]+\/rollback$/) && method === 'POST') {
       return this.handleRollbackPolicy(request);
     }
 
     // Memory administration routes
-    if (path === '/memory/query' && method === 'POST') {
+    if (path === '/api/memory/query' && method === 'POST') {
       return this.handleMemoryQuery(request);
     }
-    if (path.match(/^\/memory\/namespaces\/[^/]+$/) && method === 'DELETE') {
+    if (path.match(/^\/api\/memory\/namespaces\/[^/]+$/) && method === 'DELETE') {
       return this.handleDeleteNamespace(request);
     }
 
     // Audit log routes
-    if (path === '/audit' && method === 'GET') {
+    if (path === '/api/audit' && method === 'GET') {
       return this.handleAuditQuery(request);
     }
 
@@ -720,15 +731,24 @@ export class OperatorInterface implements IOperatorInterface {
     try {
       const session = await this.sessionManager.createSession(body.manifest, request.operatorId);
 
+      // Build a UI-friendly session summary.
+      const summary = {
+        id: session.id,
+        title: `Session — ${body.manifest.description || body.manifest.id}`,
+        lastMessagePreview: '',
+        updatedAt: session.createdAt.toISOString(),
+        hasActiveTasks: false,
+      };
+
       // Broadcast session state event.
       this.broadcastEvent('session:state', {
         channel: 'session:state',
         type: 'session_created',
-        data: { sessionId: session.id, state: session.state, manifestId: session.manifestId },
+        data: summary,
         timestamp: new Date(),
       });
 
-      return { status: 201, body: { data: session } };
+      return { status: 201, body: { data: summary } };
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to create session';
       if (message.includes('maximum concurrent sessions')) {
@@ -747,7 +767,14 @@ export class OperatorInterface implements IOperatorInterface {
     this.requirePermission(request.operatorId, PERMISSIONS.SESSION_LIST);
 
     const sessions = this.sessionManager.listSessions();
-    return { status: 200, body: { data: sessions } };
+    const summaries = sessions.map((s) => ({
+      id: s.id,
+      title: `Session — ${s.manifestId}`,
+      lastMessagePreview: '',
+      updatedAt: s.createdAt.toISOString(),
+      hasActiveTasks: s.state === 'running',
+    }));
+    return { status: 200, body: { data: summaries } };
   }
 
   /**
@@ -758,7 +785,7 @@ export class OperatorInterface implements IOperatorInterface {
   private async handleGetSession(request: RouteRequest): Promise<RouteResponse> {
     this.requirePermission(request.operatorId, PERMISSIONS.SESSION_GET);
 
-    const sessionId = this.extractPathParam(request.path, '/sessions/');
+    const sessionId = this.extractPathParam(request.path, '/api/sessions/');
     const session = this.sessionManager.getSession(sessionId);
 
     if (!session) {
@@ -780,7 +807,7 @@ export class OperatorInterface implements IOperatorInterface {
   private async handleTerminateSession(request: RouteRequest): Promise<RouteResponse> {
     this.requirePermission(request.operatorId, PERMISSIONS.SESSION_TERMINATE);
 
-    const sessionId = this.extractPathParam(request.path, '/sessions/', '/terminate');
+    const sessionId = this.extractPathParam(request.path, '/api/sessions/', '/terminate');
     const body = request.body as { reason?: string } | undefined;
     const reason = body?.reason ?? 'Terminated by operator';
 
@@ -812,7 +839,7 @@ export class OperatorInterface implements IOperatorInterface {
   private async handlePauseSession(request: RouteRequest): Promise<RouteResponse> {
     this.requirePermission(request.operatorId, PERMISSIONS.SESSION_PAUSE);
 
-    const sessionId = this.extractPathParam(request.path, '/sessions/', '/pause');
+    const sessionId = this.extractPathParam(request.path, '/api/sessions/', '/pause');
 
     try {
       await this.sessionManager.pauseSession(sessionId);
@@ -842,7 +869,7 @@ export class OperatorInterface implements IOperatorInterface {
   private async handleResumeSession(request: RouteRequest): Promise<RouteResponse> {
     this.requirePermission(request.operatorId, PERMISSIONS.SESSION_RESUME);
 
-    const sessionId = this.extractPathParam(request.path, '/sessions/', '/resume');
+    const sessionId = this.extractPathParam(request.path, '/api/sessions/', '/resume');
 
     try {
       await this.sessionManager.resumeSession(sessionId);
@@ -862,6 +889,93 @@ export class OperatorInterface implements IOperatorInterface {
       }
       return { status: 400, body: { error: { code: 'VALIDATION_ERROR', message } } };
     }
+  }
+
+  // ==================================================================
+  // REST handlers — Session messages
+  // ==================================================================
+
+  /**
+   * GET /api/sessions/:id/messages — Retrieve messages for a session.
+   * Supports cursor-based pagination via ?cursor query param.
+   */
+  private async handleGetMessages(request: RouteRequest): Promise<RouteResponse> {
+    const sessionId = this.extractPathParam(request.path, '/api/sessions/', '/messages');
+    const session = this.sessionManager.getSession(sessionId);
+    if (!session) {
+      return { status: 404, body: { error: { code: 'RESOURCE_NOT_FOUND', message: `Session '${sessionId}' not found` } } };
+    }
+
+    const messages = this.sessionMessages.get(sessionId) ?? [];
+    // Simple cursor: use index-based pagination (cursor = stringified index).
+    const pageSize = 50;
+    let startIndex = 0;
+    if (request.query.cursor) {
+      startIndex = parseInt(request.query.cursor, 10);
+      if (isNaN(startIndex) || startIndex < 0) startIndex = 0;
+    }
+
+    const page = messages.slice(startIndex, startIndex + pageSize);
+    const hasMore = startIndex + pageSize < messages.length;
+    const cursor = hasMore ? String(startIndex + pageSize) : null;
+
+    return { status: 200, body: { data: { messages: page, hasMore, cursor } } };
+  }
+
+  /**
+   * POST /api/sessions/:id/messages — Send a message in a session.
+   * Body: { content: string }
+   */
+  private async handlePostMessage(request: RouteRequest): Promise<RouteResponse> {
+    const sessionId = this.extractPathParam(request.path, '/api/sessions/', '/messages');
+    const session = this.sessionManager.getSession(sessionId);
+    if (!session) {
+      return { status: 404, body: { error: { code: 'RESOURCE_NOT_FOUND', message: `Session '${sessionId}' not found` } } };
+    }
+
+    const body = request.body as { content?: string } | undefined;
+    if (!body?.content || typeof body.content !== 'string') {
+      return { status: 400, body: { error: { code: 'VALIDATION_ERROR', message: 'Request body must include content string' } } };
+    }
+
+    const message = {
+      type: 'operator',
+      id: uuidv4(),
+      content: body.content,
+      timestamp: new Date().toISOString(),
+    };
+
+    if (!this.sessionMessages.has(sessionId)) {
+      this.sessionMessages.set(sessionId, []);
+    }
+    this.sessionMessages.get(sessionId)!.push(message);
+
+    // Broadcast the new message to subscribers of this session's channel.
+    this.broadcastEvent(`session:${sessionId}`, {
+      channel: `session:${sessionId}`,
+      type: 'new_message',
+      data: message,
+      timestamp: new Date(),
+    });
+
+    // If no agent is connected to this session, send a system message
+    // indicating the message was received but no agent is available.
+    const systemReply = {
+      type: 'system',
+      id: uuidv4(),
+      content: 'No agent is connected to this session. Connect an agent via `POST /api/agent-connections` to enable responses.',
+      timestamp: new Date().toISOString(),
+      format: 'plain',
+    };
+    this.sessionMessages.get(sessionId)!.push(systemReply);
+    this.broadcastEvent(`session:${sessionId}`, {
+      channel: `session:${sessionId}`,
+      type: 'new_message',
+      data: systemReply,
+      timestamp: new Date(),
+    });
+
+    return { status: 201, body: { data: message } };
   }
 
 
@@ -919,7 +1033,7 @@ export class OperatorInterface implements IOperatorInterface {
   private async handleGetPolicy(request: RouteRequest): Promise<RouteResponse> {
     this.requirePermission(request.operatorId, PERMISSIONS.POLICY_GET);
 
-    const policyId = this.extractPathParam(request.path, '/policies/');
+    const policyId = this.extractPathParam(request.path, '/api/policies/');
     const versionStr = request.query.version;
 
     if (versionStr) {
@@ -960,7 +1074,7 @@ export class OperatorInterface implements IOperatorInterface {
   private async handleUpdatePolicy(request: RouteRequest): Promise<RouteResponse> {
     this.requirePermission(request.operatorId, PERMISSIONS.POLICY_UPDATE);
 
-    const policyId = this.extractPathParam(request.path, '/policies/');
+    const policyId = this.extractPathParam(request.path, '/api/policies/');
     const policy = request.body as AccessPolicy | undefined;
 
     if (!policy) {
@@ -994,7 +1108,7 @@ export class OperatorInterface implements IOperatorInterface {
   private async handleRemovePolicy(request: RouteRequest): Promise<RouteResponse> {
     this.requirePermission(request.operatorId, PERMISSIONS.POLICY_REMOVE);
 
-    const policyId = this.extractPathParam(request.path, '/policies/');
+    const policyId = this.extractPathParam(request.path, '/api/policies/');
 
     // Check if policy exists before removing.
     const existing = this.policyEngine.getPolicy(policyId);
@@ -1018,7 +1132,7 @@ export class OperatorInterface implements IOperatorInterface {
   private async handleRollbackPolicy(request: RouteRequest): Promise<RouteResponse> {
     this.requirePermission(request.operatorId, PERMISSIONS.POLICY_ROLLBACK);
 
-    const policyId = this.extractPathParam(request.path, '/policies/', '/rollback');
+    const policyId = this.extractPathParam(request.path, '/api/policies/', '/rollback');
     const body = request.body as { version?: number } | undefined;
 
     if (!body?.version || typeof body.version !== 'number') {
@@ -1075,7 +1189,7 @@ export class OperatorInterface implements IOperatorInterface {
   private async handleDeleteNamespace(request: RouteRequest): Promise<RouteResponse> {
     this.requirePermission(request.operatorId, PERMISSIONS.MEMORY_DELETE);
 
-    const namespace = this.extractPathParam(request.path, '/memory/namespaces/');
+    const namespace = this.extractPathParam(request.path, '/api/memory/namespaces/');
 
     await this.memoryStore.deleteNamespace(namespace, request.operatorId);
     return { status: 200, body: { data: { namespace, deleted: true } } };
@@ -1357,8 +1471,8 @@ export class OperatorInterface implements IOperatorInterface {
 
   /**
    * Extract a path parameter from a URL path.
-   * e.g., extractPathParam('/sessions/abc123', '/sessions/') => 'abc123'
-   * e.g., extractPathParam('/sessions/abc123/terminate', '/sessions/', '/terminate') => 'abc123'
+   * e.g., extractPathParam('/api/sessions/abc123', '/api/sessions/') => 'abc123'
+   * e.g., extractPathParam('/api/sessions/abc123/terminate', '/api/sessions/', '/terminate') => 'abc123'
    */
   private extractPathParam(path: string, prefix: string, suffix?: string): string {
     let value = path.slice(prefix.length);

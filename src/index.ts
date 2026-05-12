@@ -29,6 +29,8 @@ export { AgentDiscoveryRegistry } from './subsystems/agent-discovery-registry.js
 export { ACPAdapter } from './subsystems/acp-adapter.js';
 export { AgentCPBridge } from './subsystems/agentcp-bridge.js';
 export { OperatorInterface } from './subsystems/operator-interface.js';
+export { AgentConnector } from './subsystems/agent-connector.js';
+export { TaskOrchestrator } from './subsystems/task-orchestrator.js';
 
 // ------------------------------------------------------------------
 // Operator Interface types
@@ -40,3 +42,50 @@ export type {
   RouteRequest,
   RouteResponse,
 } from './subsystems/operator-interface.js';
+
+// ------------------------------------------------------------------
+// Agent Connector types
+// ------------------------------------------------------------------
+
+export type {
+  IAgentConnector,
+  IntegrationProtocol,
+  AgentHealthStatus,
+  AgentConnectionConfig,
+  ProcessSpawnParams,
+  WebSocketParams,
+  ACPRestParams,
+  ConnectedAgent,
+  ExecutionArtifact,
+  DiffArtifact,
+  TerminalArtifact,
+  ToolInvocationArtifact,
+  ErrorArtifact,
+  DispatchResult,
+  StepResult,
+  CapabilityRequirements,
+  AgentEvent,
+  ExternalEventSourceConfig,
+} from './interfaces/agent-connector.js';
+
+// ------------------------------------------------------------------
+// Task Orchestrator types
+// ------------------------------------------------------------------
+
+export type {
+  ITaskOrchestrator,
+  CodingTaskStatus,
+  TaskStepStatus,
+  StepTriggerType,
+  StepExecutionMode,
+  TaskStep,
+  StepTrigger,
+  FeedbackEntry,
+  CodingTask,
+  CodingTaskSubmission,
+  TaskStepDefinition,
+  TaskContext,
+  ArtifactQuery,
+  ExternalEventPayload,
+  TaskEvent,
+} from './interfaces/task-orchestrator.js';

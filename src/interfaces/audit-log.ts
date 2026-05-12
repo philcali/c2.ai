@@ -8,7 +8,10 @@ export type AuditEventType =
   | 'operator_action'
   | 'acp_task'
   | 'acp_discovery'
-  | 'agentcp_session';
+  | 'agentcp_session'
+  | 'coding_task'
+  | 'agent_connector'
+  | 'external_event';
 
 export interface AuditEntry {
   sequenceNumber: number;

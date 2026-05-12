@@ -96,7 +96,7 @@ describe('CommandCenter HTTP REST routing', () => {
 
   it('should return 401 when no Authorization header is provided', async () => {
     await startCenter();
-    const res = await httpRequest({ port, method: 'GET', path: '/sessions' });
+    const res = await httpRequest({ port, method: 'GET', path: '/api/sessions' });
     expect(res.status).toBe(401);
     const body = res.body as { error: { code: string } };
     expect(body.error.code).toBe('AUTHENTICATION_FAILURE');
@@ -107,7 +107,7 @@ describe('CommandCenter HTTP REST routing', () => {
     const res = await httpRequest({
       port,
       method: 'GET',
-      path: '/sessions',
+      path: '/api/sessions',
       headers: { Authorization: 'Bearer bad-token' },
     });
     expect(res.status).toBe(401);
@@ -118,7 +118,7 @@ describe('CommandCenter HTTP REST routing', () => {
     const res = await httpRequest({
       port,
       method: 'GET',
-      path: '/sessions',
+      path: '/api/sessions',
       headers: { Authorization: 'Basic dXNlcjpwYXNz' },
     });
     expect(res.status).toBe(401);
@@ -133,7 +133,7 @@ describe('CommandCenter HTTP REST routing', () => {
     const res = await httpRequest({
       port,
       method: 'GET',
-      path: '/sessions',
+      path: '/api/sessions',
       headers: { Authorization: 'Bearer valid-token' },
     });
     expect(res.status).toBe(200);
@@ -146,7 +146,7 @@ describe('CommandCenter HTTP REST routing', () => {
     const res = await httpRequest({
       port,
       method: 'POST',
-      path: '/sessions',
+      path: '/api/sessions',
       headers: { Authorization: 'Bearer valid-token' },
       body: {
         manifest: {
@@ -160,9 +160,9 @@ describe('CommandCenter HTTP REST routing', () => {
       },
     });
     expect(res.status).toBe(201);
-    const body = res.body as { data: { id: string; state: string } };
+    const body = res.body as { data: { id: string; title: string } };
     expect(body.data.id).toBeDefined();
-    expect(body.data.state).toBe('running');
+    expect(body.data.title).toContain('Session');
   });
 
   it('should get a specific session via GET /sessions/:id', async () => {
@@ -172,7 +172,7 @@ describe('CommandCenter HTTP REST routing', () => {
     const createRes = await httpRequest({
       port,
       method: 'POST',
-      path: '/sessions',
+      path: '/api/sessions',
       headers: { Authorization: 'Bearer valid-token' },
       body: {
         manifest: {
@@ -190,7 +190,7 @@ describe('CommandCenter HTTP REST routing', () => {
     const res = await httpRequest({
       port,
       method: 'GET',
-      path: `/sessions/${sessionId}`,
+      path: `/api/sessions/${sessionId}`,
       headers: { Authorization: 'Bearer valid-token' },
     });
     expect(res.status).toBe(200);
@@ -203,7 +203,7 @@ describe('CommandCenter HTTP REST routing', () => {
     const res = await httpRequest({
       port,
       method: 'GET',
-      path: '/sessions/non-existent-id',
+      path: '/api/sessions/non-existent-id',
       headers: { Authorization: 'Bearer valid-token' },
     });
     expect(res.status).toBe(404);
@@ -218,7 +218,7 @@ describe('CommandCenter HTTP REST routing', () => {
     const res = await httpRequest({
       port,
       method: 'GET',
-      path: '/policies',
+      path: '/api/policies',
       headers: { Authorization: 'Bearer valid-token' },
     });
     expect(res.status).toBe(200);
@@ -235,7 +235,7 @@ describe('CommandCenter HTTP REST routing', () => {
     const res = await httpRequest({
       port,
       method: 'GET',
-      path: '/audit',
+      path: '/api/audit',
       headers: { Authorization: 'Bearer valid-token' },
     });
     expect(res.status).toBe(200);
@@ -248,7 +248,7 @@ describe('CommandCenter HTTP REST routing', () => {
     const res = await httpRequest({
       port,
       method: 'GET',
-      path: '/audit?agentId=agent-1&eventType=policy_decision',
+      path: '/api/audit?agentId=agent-1&eventType=policy_decision',
       headers: { Authorization: 'Bearer valid-token' },
     });
     expect(res.status).toBe(200);

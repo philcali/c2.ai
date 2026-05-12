@@ -1,0 +1,226 @@
+/* MessageRenderer — per-message-type styling */
+
+/* Shared base for all message bubbles */
+.message {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  max-width: 80%;
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-radius: var(--radius-lg);
+  font-family: var(--font-sans);
+  font-size: 0.875rem;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+/* Operator — right-aligned accent bubble */
+.operatorMessage {
+  align-self: flex-end;
+  background-color: var(--color-message-operator);
+  color: var(--color-message-operator-text);
+}
+
+/* System — left-aligned secondary bubble */
+.systemMessage {
+  align-self: flex-start;
+  background-color: var(--color-message-system);
+  color: var(--color-message-system-text);
+}
+
+/* Error — left-aligned with error border */
+.errorMessage {
+  align-self: flex-start;
+  background-color: var(--color-error-bg);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-error);
+}
+
+/* Task created — left-aligned with subtle border */
+.taskMessage {
+  align-self: flex-start;
+  background-color: var(--color-bg-secondary);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border-primary);
+}
+
+/* Memory result — left-aligned with secondary border */
+.memoryMessage {
+  align-self: flex-start;
+  background-color: var(--color-bg-secondary);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border-secondary);
+}
+
+/* Timestamp */
+.timestamp {
+  font-size: 0.6875rem;
+  color: var(--color-text-tertiary);
+  margin-top: var(--spacing-xs);
+}
+
+.operatorMessage .timestamp {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+/* Error code badge */
+.errorCode {
+  display: inline-block;
+  padding: 1px var(--spacing-xs);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 600;
+  background-color: var(--color-error);
+  color: var(--color-text-inverse);
+  border-radius: var(--radius-sm);
+  margin-right: var(--spacing-xs);
+}
+
+/* Task icon badge */
+.taskBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  font-weight: 600;
+}
+
+.taskIcon {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-sm);
+  background-color: var(--color-accent);
+  color: var(--color-accent-text);
+  font-size: 0.625rem;
+  font-weight: 700;
+  text-align: center;
+  line-height: 16px;
+}
+
+/* Memory result formatted data */
+.memoryData {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  white-space: pre-wrap;
+  background-color: var(--color-code-bg);
+  padding: var(--spacing-sm);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+}
+
+/* ---- Markdown rendering styles ---- */
+
+.markdown {
+  line-height: 1.6;
+}
+
+.markdown strong {
+  font-weight: 700;
+}
+
+.markdown em {
+  font-style: italic;
+}
+
+.inlineCode {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  background-color: var(--color-code-bg);
+  padding: 1px 4px;
+  border-radius: var(--radius-sm);
+}
+
+.codeBlock {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  background-color: var(--color-terminal-bg);
+  color: var(--color-terminal-text);
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+  white-space: pre;
+  margin: var(--spacing-xs) 0;
+}
+
+.codeBlockLabel {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  color: var(--color-text-tertiary);
+  margin-bottom: var(--spacing-xs);
+  text-transform: uppercase;
+}
+
+.markdownLink {
+  color: var(--color-accent);
+  text-decoration: underline;
+}
+
+.markdownLink:hover {
+  color: var(--color-accent-hover);
+}
+
+.markdownList {
+  margin: var(--spacing-xs) 0;
+  padding-left: var(--spacing-lg);
+  list-style-type: disc;
+}
+
+.markdownList li {
+  margin-bottom: 2px;
+}
+
+/* ---- Inline artifact section (within task messages) ---- */
+
+.artifactSection {
+  margin-top: var(--spacing-sm);
+}
+
+.artifactGroupSummary {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  padding: var(--spacing-xs) 0;
+  user-select: none;
+}
+
+.artifactGroupSummary:hover {
+  color: var(--color-text-primary);
+}
+
+/* ---- Memory result table ---- */
+
+.memoryTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+  margin-top: var(--spacing-xs);
+}
+
+.memoryTable th,
+.memoryTable td {
+  text-align: left;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border-bottom: 1px solid var(--color-border-primary);
+}
+
+.memoryTable th {
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  background-color: var(--color-bg-tertiary, var(--color-bg-secondary));
+}
+
+.memoryTable td {
+  color: var(--color-text-primary);
+}
+
+/* ---- Memory summary ---- */
+
+.memorySummary {
+  font-size: 0.875rem;
+  color: var(--color-text-primary);
+  margin-bottom: var(--spacing-sm);
+  line-height: 1.5;
+}

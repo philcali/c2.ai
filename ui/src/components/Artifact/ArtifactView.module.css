@@ -1,0 +1,243 @@
+/* ArtifactView — renders execution artifacts inline in chat */
+
+.artifact {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  border: 1px solid var(--color-border-primary);
+  border-radius: var(--radius-md);
+  background-color: var(--color-bg-secondary);
+  overflow: hidden;
+  font-family: var(--font-sans);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+/* ---- Shared header ---- */
+
+.artifactHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-xs) var(--spacing-md);
+  background-color: var(--color-bg-tertiary);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.artifactTypeLabel {
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.artifactTimestamp {
+  margin-left: auto;
+  font-weight: 400;
+  font-size: 0.6875rem;
+  color: var(--color-text-tertiary);
+}
+
+/* ---- Diff artifact ---- */
+
+.diffArtifact {
+  border-color: var(--color-accent);
+}
+
+.filePath {
+  padding: var(--spacing-xs) var(--spacing-md);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  background-color: var(--color-bg-tertiary);
+  border-bottom: 1px solid var(--color-border-secondary);
+}
+
+.diffContent {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.diffSection {
+  display: flex;
+  flex-direction: column;
+}
+
+.diffLabel {
+  padding: var(--spacing-xs) var(--spacing-md);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-text-tertiary);
+  border-bottom: 1px solid var(--color-border-secondary);
+}
+
+.diffBefore {
+  background-color: var(--color-error-bg);
+}
+
+.diffAfter {
+  background-color: var(--color-success-bg);
+}
+
+.diffCode {
+  display: block;
+  padding: var(--spacing-sm) var(--spacing-md);
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-x: auto;
+}
+
+/* ---- Terminal artifact ---- */
+
+.terminalArtifact {
+  border-color: var(--color-border-primary);
+}
+
+.terminalBlock {
+  background-color: var(--color-terminal-bg);
+  color: var(--color-terminal-text);
+  padding: var(--spacing-sm) var(--spacing-md);
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  overflow-x: auto;
+}
+
+.terminalCommand {
+  display: flex;
+  align-items: baseline;
+  gap: var(--spacing-xs);
+  margin-bottom: var(--spacing-xs);
+}
+
+.terminalPrompt {
+  color: var(--color-success);
+  font-weight: 600;
+  user-select: none;
+}
+
+.terminalCommandText {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.terminalOutput {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.terminalStdout {
+  color: var(--color-terminal-text);
+}
+
+.terminalStderr {
+  color: var(--color-error);
+}
+
+.exitCode {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-xs) var(--spacing-md);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  border-top: 1px solid var(--color-border-secondary);
+}
+
+.exitCodeSuccess {
+  color: var(--color-success);
+}
+
+.exitCodeFailure {
+  color: var(--color-error);
+}
+
+/* ---- Tool invocation artifact ---- */
+
+.toolArtifact {
+  border-color: var(--color-accent);
+}
+
+.toolBody {
+  padding: var(--spacing-sm) var(--spacing-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.toolSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.toolSectionLabel {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-text-tertiary);
+}
+
+.toolName {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.toolData {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background-color: var(--color-code-bg);
+  padding: var(--spacing-sm);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+}
+
+/* ---- Error artifact ---- */
+
+.errorArtifact {
+  border-color: var(--color-error);
+}
+
+.errorBody {
+  padding: var(--spacing-sm) var(--spacing-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.errorCodeBadge {
+  display: inline-block;
+  padding: 1px var(--spacing-xs);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 600;
+  background-color: var(--color-error);
+  color: var(--color-text-inverse);
+  border-radius: var(--radius-sm);
+  align-self: flex-start;
+}
+
+.errorMessage {
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+.errorDetails {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background-color: var(--color-error-bg);
+  padding: var(--spacing-sm);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-primary);
+}
