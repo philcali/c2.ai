@@ -31,6 +31,13 @@ import type {
   ArtifactQuery,
   ExternalEventPayload,
 } from './interfaces/task-orchestrator.js';
+import type { OrchestrationLlmConfig, AgentHarnessConfig, PlatformEvent } from './interfaces/orchestration-config.js';
+import { WorkspaceResolver } from './subsystems/workspace-resolver.js';
+import { AgentSpawner } from './subsystems/agent-spawner.js';
+import { IntentResolver } from './subsystems/intent-resolver.js';
+import { TaskPlanner } from './subsystems/task-planner.js';
+import { OrchestrationSessionManager } from './subsystems/orchestration-session-manager.js';
+import { EventIngress } from './subsystems/event-ingress.js';
 
 // ------------------------------------------------------------------
 // Configuration
@@ -61,6 +68,34 @@ export interface CommandCenterConfig {
    * - `undefined` (default) disables CORS headers entirely.
    */
   corsOrigins?: string | string[];
+
+  /**
+   * Orchestration LLM configuration for Layer 2 intent parsing and task planning.
+   * Required — the CommandCenter will throw on construction if not provided.
+   */
+  orchestrationLlm?: OrchestrationLlmConfig;
+
+  /**
+   * Agent harness configuration for on-demand agent spawning.
+   * Defines the command, arguments, and default capabilities used when
+   * the Agent_Spawner needs to start a new agent process.
+   */
+  agentHarness?: AgentHarnessConfig;
+
+  /**
+   * Intent confidence threshold (0.0–1.0).
+   * If the Intent_Resolver's confidence score is below this threshold,
+   * the operator will be asked to confirm the interpreted intent.
+   * @default 0.7
+   */
+  intentConfidenceThreshold?: number;
+
+  /**
+   * Maximum number of concurrent autonomous sessions triggered by platform events.
+   * Autonomous sessions exceeding this limit will be queued.
+   * @default 5
+   */
+  maxAutonomousSessions?: number;
 }
 
 // ------------------------------------------------------------------
@@ -107,6 +142,14 @@ export class CommandCenter {
   private readonly _operatorInterface: OperatorInterface;
   private readonly _agentConnector: AgentConnector;
   private readonly _taskOrchestrator: TaskOrchestrator;
+
+  // Layer 2 — Intent-Driven Orchestration subsystems
+  private readonly _workspaceResolver: WorkspaceResolver;
+  private readonly _agentSpawner: AgentSpawner;
+  private readonly _intentResolver: IntentResolver;
+  private readonly _taskPlanner: TaskPlanner;
+  private readonly _orchestrationSessionManager: OrchestrationSessionManager;
+  private readonly _eventIngress: EventIngress;
 
   // ------------------------------------------------------------------
   // Server state
@@ -213,6 +256,61 @@ export class CommandCenter {
       operatorInterface: this._operatorInterface,
       discoveryRegistry: this._agentDiscoveryRegistry,
       sessionManager: this._sessionManager,
+    });
+
+    // 8. Layer 2 — Intent-Driven Orchestration subsystems
+    // Validate that orchestrationLlm config is provided (required for Layer 2).
+    if (!config.orchestrationLlm) {
+      throw new Error(
+        'CommandCenter requires orchestrationLlm configuration for Layer 2 orchestration. ' +
+        'Provide an orchestrationLlm field in CommandCenterConfig with provider, endpoint, model, and apiKeyRef.',
+      );
+    }
+
+    // Instantiate in dependency order:
+    // WorkspaceResolver → AgentSpawner → IntentResolver → TaskPlanner → OrchestrationSessionManager → EventIngress
+
+    this._workspaceResolver = new WorkspaceResolver({
+      memoryStore: this._memoryStore,
+      auditLog: this._auditLog,
+    });
+
+    this._agentSpawner = new AgentSpawner({
+      agentConnector: this._agentConnector,
+      discoveryRegistry: this._agentDiscoveryRegistry,
+      sessionManager: this._sessionManager,
+      auditLog: this._auditLog,
+      harnessConfig: config.agentHarness,
+    });
+
+    this._intentResolver = new IntentResolver({
+      mcpGateway: this._mcpGateway,
+      auditLog: this._auditLog,
+      orchestrationLlmConfig: config.orchestrationLlm,
+      confidenceThreshold: config.intentConfidenceThreshold,
+    });
+
+    this._taskPlanner = new TaskPlanner({
+      mcpGateway: this._mcpGateway,
+      taskOrchestrator: this._taskOrchestrator,
+      auditLog: this._auditLog,
+      orchestrationLlmConfig: config.orchestrationLlm,
+    });
+
+    this._orchestrationSessionManager = new OrchestrationSessionManager({
+      intentResolver: this._intentResolver,
+      workspaceResolver: this._workspaceResolver,
+      agentSpawner: this._agentSpawner,
+      taskPlanner: this._taskPlanner,
+      policyEngine: this._policyEngine,
+      auditLog: this._auditLog,
+      operatorInterface: this._operatorInterface,
+    });
+
+    this._eventIngress = new EventIngress({
+      orchestrationSession: this._orchestrationSessionManager,
+      policyEngine: this._policyEngine,
+      auditLog: this._auditLog,
     });
   }
 
@@ -393,6 +491,14 @@ export class CommandCenter {
     const method = req.method ?? 'GET';
     const path = parsedUrl.pathname;
 
+    // Handle webhook endpoint before auth check — webhooks authenticate
+    // via HMAC signature validation, not Bearer tokens.
+    // Route: POST /webhooks/:sourceId
+    if (path.match(/^\/webhooks\/[^/]+$/) && method === 'POST') {
+      await this.handleWebhookRequest(path, body, req, res);
+      return;
+    }
+
     // Handle the login endpoint before the auth check — this is the
     // only unauthenticated route.  The client sends { token } and we
     // validate it through the same authenticate callback used for
@@ -452,6 +558,18 @@ export class CommandCenter {
     // Check if this is an ACP route (handle BEFORE operator interface routes).
     if (path.startsWith('/agents') || (path.startsWith('/tasks') && !path.startsWith('/tasks/coding'))) {
       await this.handleAcpRequest(method, path, body, operatorId, req, res);
+      return;
+    }
+
+    // Check if this is an orchestration intent route.
+    if (path === '/api/orchestrate' && method === 'POST') {
+      await this.handleOrchestrateRequest(body, operatorId, res);
+      return;
+    }
+
+    // Check if this is an orchestration session management route.
+    if (path.startsWith('/api/orchestration-sessions')) {
+      await this.handleOrchestrationSessionRequest(method, path, body, operatorId, res);
       return;
     }
 
@@ -646,6 +764,305 @@ export class CommandCenter {
 
     if (!res.writableEnded) {
       res.end();
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Internal — Orchestration intent handling
+  // ------------------------------------------------------------------
+
+  /**
+   * Handle POST /api/orchestrate — Parse operator message through IntentResolver
+   * and create an orchestration session.
+   *
+   * Flow:
+   *  1. Parse the message into a StructuredIntent via IntentResolver.
+   *  2. If confidence is below threshold, return the clarification request.
+   *  3. If confidence is sufficient, create an OrchestrationSession and begin advancing.
+   *
+   * Requirements: 1.1, 1.4
+   */
+  private async handleOrchestrateRequest(
+    body: unknown,
+    operatorId: string,
+    res: ServerResponse,
+  ): Promise<void> {
+    try {
+      const requestBody = body as { message?: string; sessionId?: string } | undefined;
+
+      if (!requestBody?.message || typeof requestBody.message !== 'string') {
+        this.sendJsonResponse(res, 400, {
+          error: { code: 'VALIDATION_ERROR', message: 'Request body must include a "message" string' },
+        });
+        return;
+      }
+
+      const { message, sessionId } = requestBody;
+
+      // Parse the intent via IntentResolver.
+      const intent = await this._intentResolver.parseIntent(
+        message,
+        operatorId,
+        sessionId ? { sessionId } : undefined,
+      );
+
+      // Check confidence threshold.
+      const threshold = this._intentResolver.getConfidenceThreshold();
+      if (intent.confidence < threshold) {
+        // Low confidence — request clarification.
+        const reason = !intent.repository
+          ? 'Could not determine target repository'
+          : !intent.action || intent.action === ''
+            ? 'Could not determine desired action'
+            : 'Low confidence in interpretation';
+
+        const clarification = await this._intentResolver.requestClarification(intent, reason);
+
+        this.sendJsonResponse(res, 200, {
+          data: {
+            status: 'clarification_needed',
+            intent,
+            clarification,
+          },
+        });
+        return;
+      }
+
+      // Confidence is sufficient — create an orchestration session.
+      const session = await this._orchestrationSessionManager.createSession(intent, operatorId);
+
+      // If the session is not pending approval, begin advancing it.
+      if (session.state !== 'pending_approval') {
+        // Advance asynchronously — don't block the response.
+        this.advanceSessionAsync(session.id);
+      }
+
+      this.sendJsonResponse(res, 201, {
+        data: {
+          status: 'session_created',
+          session,
+        },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Internal error';
+      this.sendJsonResponse(res, 500, {
+        error: { code: 'ORCHESTRATION_ERROR', message },
+      });
+    }
+  }
+
+  /**
+   * Handle orchestration session management routes.
+   *
+   * Routes:
+   *  - GET    /api/orchestration-sessions           — List sessions
+   *  - GET    /api/orchestration-sessions/:id       — Get session
+   *  - POST   /api/orchestration-sessions/:id/approve — Approve pending session
+   *  - POST   /api/orchestration-sessions/:id/cancel  — Cancel session
+   *  - POST   /api/orchestration-sessions/:id/advance — Advance session
+   *  - GET    /api/orchestration-sessions/:id/history — Get session history
+   */
+  private async handleOrchestrationSessionRequest(
+    method: string,
+    path: string,
+    body: unknown,
+    operatorId: string,
+    res: ServerResponse,
+  ): Promise<void> {
+    try {
+      // POST /api/orchestration-sessions/:id/approve
+      if (path.match(/^\/api\/orchestration-sessions\/[^/]+\/approve$/) && method === 'POST') {
+        const sessionId = this.extractPathParam(path, '/api/orchestration-sessions/', '/approve');
+        const session = await this._orchestrationSessionManager.approve(sessionId, operatorId);
+        // Begin advancing after approval.
+        this.advanceSessionAsync(session.id);
+        this.sendJsonResponse(res, 200, { data: session });
+        return;
+      }
+
+      // POST /api/orchestration-sessions/:id/cancel
+      if (path.match(/^\/api\/orchestration-sessions\/[^/]+\/cancel$/) && method === 'POST') {
+        const sessionId = this.extractPathParam(path, '/api/orchestration-sessions/', '/cancel');
+        const cancelBody = body as { reason?: string } | undefined;
+        const reason = cancelBody?.reason ?? 'Canceled by operator';
+        await this._orchestrationSessionManager.cancel(sessionId, reason, operatorId);
+        this.sendJsonResponse(res, 200, { data: { sessionId, canceled: true } });
+        return;
+      }
+
+      // POST /api/orchestration-sessions/:id/advance
+      if (path.match(/^\/api\/orchestration-sessions\/[^/]+\/advance$/) && method === 'POST') {
+        const sessionId = this.extractPathParam(path, '/api/orchestration-sessions/', '/advance');
+        const session = await this._orchestrationSessionManager.advance(sessionId);
+        this.sendJsonResponse(res, 200, { data: session });
+        return;
+      }
+
+      // GET /api/orchestration-sessions/:id/history
+      if (path.match(/^\/api\/orchestration-sessions\/[^/]+\/history$/) && method === 'GET') {
+        const sessionId = this.extractPathParam(path, '/api/orchestration-sessions/', '/history');
+        const history = await this._orchestrationSessionManager.getHistory(sessionId);
+        this.sendJsonResponse(res, 200, { data: history });
+        return;
+      }
+
+      // GET /api/orchestration-sessions/:id
+      if (path.match(/^\/api\/orchestration-sessions\/[^/]+$/) && method === 'GET') {
+        const sessionId = path.slice('/api/orchestration-sessions/'.length);
+        const session = this._orchestrationSessionManager.getSession(sessionId);
+        if (!session) {
+          this.sendJsonResponse(res, 404, {
+            error: { code: 'RESOURCE_NOT_FOUND', message: `Orchestration session '${sessionId}' not found` },
+          });
+          return;
+        }
+        this.sendJsonResponse(res, 200, { data: session });
+        return;
+      }
+
+      // GET /api/orchestration-sessions
+      if (path === '/api/orchestration-sessions' && method === 'GET') {
+        const sessions = this._orchestrationSessionManager.listSessions({ operatorId });
+        this.sendJsonResponse(res, 200, { data: sessions });
+        return;
+      }
+
+      this.sendJsonResponse(res, 404, {
+        error: { code: 'RESOURCE_NOT_FOUND', message: `Route not found: ${method} ${path}` },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Internal error';
+      if (message.includes('not found')) {
+        this.sendJsonResponse(res, 404, {
+          error: { code: 'RESOURCE_NOT_FOUND', message },
+        });
+      } else if (message.includes('Cannot')) {
+        this.sendJsonResponse(res, 400, {
+          error: { code: 'VALIDATION_ERROR', message },
+        });
+      } else {
+        this.sendJsonResponse(res, 500, {
+          error: { code: 'ORCHESTRATION_ERROR', message },
+        });
+      }
+    }
+  }
+
+  /**
+   * Advance an orchestration session asynchronously through its lifecycle.
+   *
+   * Continues advancing until the session reaches a terminal state or
+   * encounters an error. Errors are handled within the session manager
+   * (transitions to 'failed' state).
+   */
+  private advanceSessionAsync(sessionId: string): void {
+    const advanceLoop = async () => {
+      const terminalStates = ['completed', 'failed', 'pending_approval'];
+      let session = this._orchestrationSessionManager.getSession(sessionId);
+
+      while (session && !terminalStates.includes(session.state)) {
+        try {
+          session = await this._orchestrationSessionManager.advance(sessionId);
+        } catch {
+          // The session manager handles errors by transitioning to 'failed'.
+          break;
+        }
+      }
+    };
+
+    // Fire and forget — errors are captured in the session state.
+    advanceLoop().catch(() => {
+      // Swallow unhandled rejections; session state captures the failure.
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // Internal — Webhook request handling
+  // ------------------------------------------------------------------
+
+  /**
+   * Handle POST /webhooks/:sourceId — Receive platform webhook events.
+   *
+   * Webhooks authenticate via HMAC-SHA256 signature validation (handled
+   * by the EventIngress subsystem), not via Bearer tokens.
+   *
+   * The request body is treated as the event payload. The signature is
+   * extracted from the X-Hub-Signature-256 header (GitHub convention)
+   * or X-Webhook-Signature header.
+   *
+   * Requirements: 5.1, 5.6
+   */
+  private async handleWebhookRequest(
+    path: string,
+    body: unknown,
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
+    try {
+      const sourceId = decodeURIComponent(path.slice('/webhooks/'.length));
+
+      // Extract the event type from headers (GitHub uses X-GitHub-Event).
+      const eventType =
+        (req.headers['x-github-event'] as string) ??
+        (req.headers['x-gitlab-event'] as string) ??
+        'unknown';
+
+      // Extract the signature from headers.
+      const signatureHeader =
+        (req.headers['x-hub-signature-256'] as string) ??
+        (req.headers['x-webhook-signature'] as string) ??
+        undefined;
+
+      // Strip the "sha256=" prefix if present (GitHub convention).
+      const signature = signatureHeader?.startsWith('sha256=')
+        ? signatureHeader.slice(7)
+        : signatureHeader;
+
+      // Build the PlatformEvent.
+      const platformEvent: PlatformEvent = {
+        id: `evt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+        sourceId,
+        eventType,
+        payload: body,
+        signature,
+        receivedAt: new Date(),
+      };
+
+      // Process the event through EventIngress.
+      const orchestrationSessionId = await this._eventIngress.processEvent(platformEvent);
+
+      // Begin advancing the session asynchronously.
+      const session = this._orchestrationSessionManager.getSession(orchestrationSessionId);
+      if (session && session.state !== 'pending_approval') {
+        this.advanceSessionAsync(orchestrationSessionId);
+      }
+
+      this.sendJsonResponse(res, 202, {
+        data: {
+          accepted: true,
+          orchestrationSessionId,
+        },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Internal error';
+
+      if (message.includes('not registered')) {
+        this.sendJsonResponse(res, 404, {
+          error: { code: 'SOURCE_NOT_FOUND', message },
+        });
+      } else if (message.includes('signature validation failed')) {
+        this.sendJsonResponse(res, 401, {
+          error: { code: 'SIGNATURE_INVALID', message },
+        });
+      } else if (message.includes('not allowed')) {
+        this.sendJsonResponse(res, 400, {
+          error: { code: 'EVENT_TYPE_NOT_ALLOWED', message },
+        });
+      } else {
+        this.sendJsonResponse(res, 500, {
+          error: { code: 'WEBHOOK_ERROR', message },
+        });
+      }
     }
   }
 
@@ -994,6 +1411,32 @@ export class CommandCenter {
 
   get taskOrchestrator(): TaskOrchestrator {
     return this._taskOrchestrator;
+  }
+
+  // Layer 2 — Intent-Driven Orchestration subsystem getters
+
+  get workspaceResolver(): WorkspaceResolver {
+    return this._workspaceResolver;
+  }
+
+  get agentSpawner(): AgentSpawner {
+    return this._agentSpawner;
+  }
+
+  get intentResolver(): IntentResolver {
+    return this._intentResolver;
+  }
+
+  get taskPlanner(): TaskPlanner {
+    return this._taskPlanner;
+  }
+
+  get orchestrationSessionManager(): OrchestrationSessionManager {
+    return this._orchestrationSessionManager;
+  }
+
+  get eventIngress(): EventIngress {
+    return this._eventIngress;
   }
 
   /** Whether the Command Center is currently running. */

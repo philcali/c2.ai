@@ -2,10 +2,19 @@ import { describe, it, expect, afterEach } from 'vitest';
 import http from 'http';
 import { CommandCenter } from '../../src/command-center.js';
 import type { OperatorCredentials } from '../../src/subsystems/operator-interface.js';
+import type { OrchestrationLlmConfig } from '../../src/interfaces/orchestration-config.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** Minimal orchestration LLM config for tests. */
+const TEST_ORCHESTRATION_LLM: OrchestrationLlmConfig = {
+  provider: 'openai-compatible',
+  endpoint: 'http://localhost:11434',
+  model: 'test-model',
+  apiKeyRef: 'test-key',
+};
 
 /** Simple HTTP request helper that returns status, headers, and parsed JSON body. */
 function httpRequest(
@@ -83,6 +92,7 @@ describe('CommandCenter HTTP REST routing', () => {
       port: 0,
       authenticate: testAuthenticate,
       maxConcurrentSessions: 10,
+      orchestrationLlm: TEST_ORCHESTRATION_LLM,
     });
     await cc.start();
     const addr = cc.address;
@@ -307,7 +317,7 @@ describe('CommandCenter HTTP REST routing', () => {
   // -----------------------------------------------------------------------
 
   it('should return null address when not running', () => {
-    cc = new CommandCenter({ port: 0 });
+    cc = new CommandCenter({ port: 0, orchestrationLlm: TEST_ORCHESTRATION_LLM });
     expect(cc.address).toBeNull();
   });
 

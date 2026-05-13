@@ -89,3 +89,47 @@ export type {
   ExternalEventPayload,
   TaskEvent,
 } from './interfaces/task-orchestrator.js';
+
+// ------------------------------------------------------------------
+// Layer 2 subsystem implementations
+// ------------------------------------------------------------------
+
+export { IntentResolver } from './subsystems/intent-resolver.js';
+export { WorkspaceResolver } from './subsystems/workspace-resolver.js';
+export { AgentSpawner } from './subsystems/agent-spawner.js';
+export { EventIngress } from './subsystems/event-ingress.js';
+export { OrchestrationSessionManager } from './subsystems/orchestration-session-manager.js';
+export { TaskPlanner } from './subsystems/task-planner.js';
+
+// ------------------------------------------------------------------
+// Layer 2 interfaces
+// ------------------------------------------------------------------
+
+export type { IIntentResolver } from './interfaces/intent-resolver.js';
+export type { IWorkspaceResolver } from './interfaces/workspace-resolver.js';
+export type { IAgentSpawner } from './interfaces/agent-spawner.js';
+export type { IEventIngress } from './interfaces/event-ingress.js';
+export type { IOrchestrationSessionManager } from './interfaces/orchestration-session.js';
+export type { ITaskPlanner } from './interfaces/task-planner.js';
+
+// ------------------------------------------------------------------
+// Orchestration Config types (Layer 2)
+// ------------------------------------------------------------------
+
+export type {
+  OrchestrationLlmConfig,
+  AgentHarnessConfig,
+  StructuredIntent,
+  ClarificationRequest,
+  WorkspaceContext,
+  WorkspaceMetadata,
+  OrchestrationState,
+  OrchestrationSession,
+  OrchestrationEvent,
+  PlanningContext,
+  GeneratedPlan,
+  PlatformEvent,
+  EventSourceRegistration,
+  SpawnRequest,
+  SpawnResult,
+} from './interfaces/orchestration-config.js';

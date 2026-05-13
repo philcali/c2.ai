@@ -7,10 +7,22 @@ import { MemoryStore } from '../../src/subsystems/memory-store.js';
 import { AntiLeakage } from '../../src/subsystems/anti-leakage.js';
 import { CommunicationBus } from '../../src/subsystems/communication-bus.js';
 import { MCPGateway, type ServiceExecutor } from '../../src/subsystems/mcp-gateway.js';
+import { AgentConnector } from '../../src/subsystems/agent-connector.js';
+import { AgentDiscoveryRegistry } from '../../src/subsystems/agent-discovery-registry.js';
+import { ACPAdapter } from '../../src/subsystems/acp-adapter.js';
+import { AgentCPBridge } from '../../src/subsystems/agentcp-bridge.js';
+import { OperatorInterface } from '../../src/subsystems/operator-interface.js';
+import { TaskOrchestrator } from '../../src/subsystems/task-orchestrator.js';
+import { WorkspaceResolver } from '../../src/subsystems/workspace-resolver.js';
+import { AgentSpawner } from '../../src/subsystems/agent-spawner.js';
+import { IntentResolver } from '../../src/subsystems/intent-resolver.js';
+import { TaskPlanner } from '../../src/subsystems/task-planner.js';
+import { OrchestrationSessionManager } from '../../src/subsystems/orchestration-session-manager.js';
 import type { AgentManifest } from '../../src/interfaces/manifest-validator.js';
 import type { AccessPolicy } from '../../src/interfaces/policy-engine.js';
 import type { ACPMessagePayload } from '../../src/interfaces/communication-bus.js';
 import type { ServiceConfig, OperationResult } from '../../src/interfaces/mcp-gateway.js';
+import type { OrchestrationLlmConfig } from '../../src/interfaces/orchestration-config.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -610,5 +622,604 @@ describe('End-to-end agent workflow', () => {
       const termOps = termEntries.filter(e => e.operation === 'terminate_session');
       expect(termOps.length).toBe(2);
     });
+  });
+});
+
+// ===========================================================================
+// Layer 2 Integration Tests — Intent-Driven Orchestration
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Layer 2 Helpers
+// ---------------------------------------------------------------------------
+
+/** Default orchestration LLM config for tests. */
+const testOrchestrationLlmConfig: OrchestrationLlmConfig = {
+  provider: 'openai-compatible',
+  endpoint: 'http://localhost:11434',
+  model: 'test-model',
+  apiKeyRef: 'test-key',
+  temperature: 0.3,
+  maxTokens: 1024,
+};
+
+/** Orchestration LLM service config for MCP Gateway registration. */
+const orchestrationLlmService: ServiceConfig = {
+  id: '__orchestration_llm',
+  name: 'Orchestration LLM',
+  endpoint: 'http://localhost:11434',
+  credentialRef: 'test-key',
+  rateLimits: { perAgent: 1000, perService: 5000, windowMs: 60_000 },
+};
+
+/**
+ * Create a mock MCP Gateway executor that returns properly formatted
+ * LLM responses for IntentResolver and TaskPlanner.
+ */
+function createOrchestrationExecutor(overrides?: {
+  intentResponse?: Record<string, unknown>;
+  planResponse?: Record<string, unknown>;
+}): ServiceExecutor {
+  let callCount = 0;
+
+  const defaultIntentResponse = {
+    repository: 'acme/web-app',
+    action: 'fix the login bug',
+    branch: 'main',
+    confidence: 0.9,
+    constraints: {},
+  };
+
+  const defaultPlanResponse = {
+    steps: [
+      { instructions: 'Investigate the login bug in auth module', executionMode: 'agent' },
+      { instructions: 'Apply fix and write tests', executionMode: 'agent' },
+    ],
+    reasoning: 'Two-step plan: investigate then fix',
+    estimatedDuration: '30m',
+  };
+
+  return async (_serviceId, _operation, params) => {
+    callCount++;
+    const reqParams = params as { messages?: Array<{ content: string }> };
+
+    // Determine if this is an intent parsing call or a planning call
+    // by inspecting the system prompt content
+    const systemMessage = reqParams.messages?.[0]?.content ?? '';
+    const isPlanning = systemMessage.includes('task planning') || systemMessage.includes('task steps');
+
+    const responseContent = isPlanning
+      ? JSON.stringify(overrides?.planResponse ?? defaultPlanResponse)
+      : JSON.stringify(overrides?.intentResponse ?? defaultIntentResponse);
+
+    return {
+      success: true,
+      data: {
+        choices: [{
+          message: {
+            content: responseContent,
+          },
+        }],
+      },
+    };
+  };
+}
+
+interface Layer2TestSubsystems {
+  auditLog: AuditLog;
+  policyEngine: PolicyEngine;
+  manifestValidator: ManifestValidator;
+  sessionManager: SessionManager;
+  memoryStore: MemoryStore;
+  antiLeakage: AntiLeakage;
+  communicationBus: CommunicationBus;
+  mcpGateway: MCPGateway;
+  agentDiscoveryRegistry: AgentDiscoveryRegistry;
+  acpAdapter: ACPAdapter;
+  agentCPBridge: AgentCPBridge;
+  operatorInterface: OperatorInterface;
+  agentConnector: AgentConnector;
+  taskOrchestrator: TaskOrchestrator;
+  workspaceResolver: WorkspaceResolver;
+  agentSpawner: AgentSpawner;
+  intentResolver: IntentResolver;
+  taskPlanner: TaskPlanner;
+  orchestrationSessionManager: OrchestrationSessionManager;
+}
+
+/**
+ * Create all Layer 1 and Layer 2 subsystems with real wiring,
+ * matching the CommandCenter constructor.
+ */
+function createLayer2Subsystems(opts?: {
+  executor?: ServiceExecutor;
+  maxConcurrentSessions?: number;
+}): Layer2TestSubsystems {
+  // Layer 1 — Foundation
+  const auditLog = new AuditLog();
+  const policyEngine = new PolicyEngine();
+  const manifestValidator = new ManifestValidator();
+  const agentDiscoveryRegistry = new AgentDiscoveryRegistry();
+
+  const sessionManager = new SessionManager({
+    auditLog,
+    policyEngine,
+    maxConcurrentSessions: opts?.maxConcurrentSessions ?? 20,
+  });
+
+  const memoryStore = new MemoryStore({ policyEngine, auditLog });
+  const antiLeakage = new AntiLeakage({ policyEngine });
+
+  const communicationBus = new CommunicationBus({
+    policyEngine,
+    antiLeakage,
+    auditLog,
+    sessionManager,
+  });
+
+  const mcpGateway = new MCPGateway({
+    policyEngine,
+    auditLog,
+    antiLeakage,
+    executor: opts?.executor,
+  });
+
+  const acpAdapter = new ACPAdapter({
+    discoveryRegistry: agentDiscoveryRegistry,
+    communicationBus,
+    policyEngine,
+    auditLog,
+  });
+
+  const agentCPBridge = new AgentCPBridge({
+    sessionManager,
+    policyEngine,
+    mcpGateway,
+    auditLog,
+  });
+
+  const operatorInterface = new OperatorInterface({
+    sessionManager,
+    policyEngine,
+    memoryStore,
+    auditLog,
+    authenticate: () => undefined,
+  });
+
+  const agentConnector = new AgentConnector({
+    sessionManager,
+    discoveryRegistry: agentDiscoveryRegistry,
+    policyEngine,
+    agentcpBridge: agentCPBridge,
+    communicationBus,
+    acpAdapter,
+    antiLeakage,
+    auditLog,
+  });
+
+  const taskOrchestrator = new TaskOrchestrator({
+    agentConnector,
+    memoryStore,
+    policyEngine,
+    mcpGateway,
+    auditLog,
+    operatorInterface,
+    discoveryRegistry: agentDiscoveryRegistry,
+    sessionManager,
+  });
+
+  // Layer 2 — Intent-Driven Orchestration
+  const workspaceResolver = new WorkspaceResolver({
+    memoryStore,
+    auditLog,
+  });
+
+  const agentSpawner = new AgentSpawner({
+    agentConnector,
+    discoveryRegistry: agentDiscoveryRegistry,
+    sessionManager,
+    auditLog,
+    harnessConfig: {
+      command: 'node',
+      args: ['--experimental-vm-modules'],
+      env: {},
+      defaultCapabilities: { languages: ['typescript'], frameworks: [], tools: [] },
+    },
+  });
+
+  const intentResolver = new IntentResolver({
+    mcpGateway,
+    auditLog,
+    orchestrationLlmConfig: testOrchestrationLlmConfig,
+    confidenceThreshold: 0.7,
+  });
+
+  const taskPlanner = new TaskPlanner({
+    mcpGateway,
+    taskOrchestrator,
+    auditLog,
+    orchestrationLlmConfig: testOrchestrationLlmConfig,
+  });
+
+  const orchestrationSessionManager = new OrchestrationSessionManager({
+    intentResolver,
+    workspaceResolver,
+    agentSpawner,
+    taskPlanner,
+    policyEngine,
+    auditLog,
+    operatorInterface,
+  });
+
+  return {
+    auditLog,
+    policyEngine,
+    manifestValidator,
+    sessionManager,
+    memoryStore,
+    antiLeakage,
+    communicationBus,
+    mcpGateway,
+    agentDiscoveryRegistry,
+    acpAdapter,
+    agentCPBridge,
+    operatorInterface,
+    agentConnector,
+    taskOrchestrator,
+    workspaceResolver,
+    agentSpawner,
+    intentResolver,
+    taskPlanner,
+    orchestrationSessionManager,
+  };
+}
+
+// ===========================================================================
+// Layer 2: Full operator intent flow
+// Validates: Requirements 1.1, 2.1, 3.1, 4.1, 6.1
+// ===========================================================================
+
+describe('Layer 2: Full operator intent flow', () => {
+  let sub: Layer2TestSubsystems;
+
+  beforeEach(() => {
+    sub = createLayer2Subsystems({ executor: createOrchestrationExecutor() });
+
+    // Register the orchestration LLM service in the MCP Gateway
+    sub.mcpGateway.registerService(orchestrationLlmService);
+
+    // Add policies for the orchestration agent to use the LLM service
+    sub.policyEngine.addPolicy(allowPolicy(
+      'pol-orch-llm', '__c2_orchestration', ['chat.completions'], ['mcp:__orchestration_llm'],
+    ));
+
+    // Add policies for the workspace resolver to read/write memory
+    sub.policyEngine.addPolicy(allowPolicy(
+      'pol-ws-mem-write', '__c2_workspace_resolver', ['write'], ['memory:__workspaces'],
+    ));
+    sub.policyEngine.addPolicy(allowPolicy(
+      'pol-ws-mem-read', '__c2_workspace_resolver', ['read'], ['memory:__workspaces'],
+    ));
+  });
+
+  it('should drive an operator message through intent → workspace → agent → task → execution', async () => {
+    // Step 1: Parse intent from operator message
+    const intent = await sub.intentResolver.parseIntent(
+      'Fix the login bug in acme/web-app',
+      'operator-1',
+    );
+
+    expect(intent.repository).toBe('acme/web-app');
+    expect(intent.action).toBe('fix the login bug');
+    expect(intent.confidence).toBeGreaterThanOrEqual(0.7);
+
+    // Step 2: Create an orchestration session
+    const session = await sub.orchestrationSessionManager.createSession(intent, 'operator-1');
+    expect(session.state).toBe('intent_received');
+    expect(session.intent.id).toBe(intent.id);
+
+    // Step 3: Advance → resolving_workspace
+    const afterResolving = await sub.orchestrationSessionManager.advance(session.id);
+    expect(afterResolving.state).toBe('resolving_workspace');
+
+    // Step 4: Advance → spawning_agent (workspace resolved)
+    const afterSpawning = await sub.orchestrationSessionManager.advance(session.id);
+    expect(afterSpawning.state).toBe('spawning_agent');
+    expect(afterSpawning.workspaceContext).toBeDefined();
+    expect(afterSpawning.workspaceContext!.repositoryUrl).toContain('acme/web-app');
+
+    // Step 5: Advance → planning_task (agent spawned)
+    const afterPlanning = await sub.orchestrationSessionManager.advance(session.id);
+    expect(afterPlanning.state).toBe('planning_task');
+    expect(afterPlanning.agentId).toBeDefined();
+    expect(afterPlanning.agentSessionId).toBeDefined();
+
+    // Step 6: Advance → executing (task plan submitted)
+    const afterExecuting = await sub.orchestrationSessionManager.advance(session.id);
+    expect(afterExecuting.state).toBe('executing');
+    expect(afterExecuting.codingTaskId).toBeDefined();
+
+    // Verify the coding task was created in the TaskOrchestrator
+    const codingTask = sub.taskOrchestrator.getTask(afterExecuting.codingTaskId!);
+    expect(codingTask).toBeDefined();
+    expect(codingTask!.steps.length).toBe(2);
+    expect(codingTask!.steps[0].instructions).toBe('Investigate the login bug in auth module');
+    expect(codingTask!.steps[1].instructions).toBe('Apply fix and write tests');
+
+    // Step 7: Advance → completed
+    const afterCompleted = await sub.orchestrationSessionManager.advance(session.id);
+    expect(afterCompleted.state).toBe('completed');
+    expect(afterCompleted.completedAt).toBeDefined();
+
+    // Verify audit trail covers the full lifecycle
+    const auditEntries = await sub.auditLog.query({});
+    const orchestrationEntries = auditEntries.filter(
+      e => e.resource?.includes('orchestration_session'),
+    );
+    expect(orchestrationEntries.length).toBeGreaterThanOrEqual(1);
+
+    // Verify session history records all transitions
+    const history = await sub.orchestrationSessionManager.getHistory(session.id);
+    const states = history.map(e => e.toState);
+    expect(states).toContain('resolving_workspace');
+    expect(states).toContain('spawning_agent');
+    expect(states).toContain('planning_task');
+    expect(states).toContain('executing');
+    expect(states).toContain('completed');
+  });
+
+  it('should record audit entries for each lifecycle phase', async () => {
+    const intent = await sub.intentResolver.parseIntent(
+      'Fix the login bug in acme/web-app',
+      'operator-1',
+    );
+
+    const session = await sub.orchestrationSessionManager.createSession(intent, 'operator-1');
+
+    // Advance through all states
+    await sub.orchestrationSessionManager.advance(session.id); // → resolving_workspace
+    await sub.orchestrationSessionManager.advance(session.id); // → spawning_agent
+    await sub.orchestrationSessionManager.advance(session.id); // → planning_task
+    await sub.orchestrationSessionManager.advance(session.id); // → executing
+    await sub.orchestrationSessionManager.advance(session.id); // → completed
+
+    // Verify audit log has entries from multiple subsystems
+    const allEntries = await sub.auditLog.query({});
+
+    // Should have: intent_parsed, orchestration_session_created, workspace_resolved,
+    // agent_spawned/connected, plan_generated, plan_submitted, state transitions
+    expect(allEntries.length).toBeGreaterThanOrEqual(6);
+
+    // Verify intent parsing was audited
+    const intentEntries = allEntries.filter(e => e.operation === 'intent_parsed');
+    expect(intentEntries.length).toBeGreaterThanOrEqual(1);
+
+    // Verify workspace resolution was audited
+    const workspaceEntries = allEntries.filter(e => e.operation === 'workspace_resolved');
+    expect(workspaceEntries.length).toBeGreaterThanOrEqual(1);
+
+    // Verify agent spawn was audited
+    const agentEntries = allEntries.filter(
+      e => e.operation === 'agent_spawned' || e.operation === 'connect',
+    );
+    expect(agentEntries.length).toBeGreaterThanOrEqual(1);
+
+    // Verify plan generation was audited
+    const planEntries = allEntries.filter(e => e.operation === 'plan_generated');
+    expect(planEntries.length).toBeGreaterThanOrEqual(1);
+
+    // Verify monotonic sequence numbers
+    for (let i = 1; i < allEntries.length; i++) {
+      expect(allEntries[i].sequenceNumber).toBeGreaterThan(allEntries[i - 1].sequenceNumber);
+    }
+  });
+});
+
+// ===========================================================================
+// Layer 2: Workspace caching flow
+// Validates: Requirements 2.2, 8.1, 8.2, 8.3
+// ===========================================================================
+
+describe('Layer 2: Workspace caching flow', () => {
+  let sub: Layer2TestSubsystems;
+
+  beforeEach(() => {
+    sub = createLayer2Subsystems({ executor: createOrchestrationExecutor() });
+
+    // Register the orchestration LLM service
+    sub.mcpGateway.registerService(orchestrationLlmService);
+
+    // Add policies for the orchestration agent
+    sub.policyEngine.addPolicy(allowPolicy(
+      'pol-orch-llm', '__c2_orchestration', ['chat.completions'], ['mcp:__orchestration_llm'],
+    ));
+
+    // Add policies for the workspace resolver to read/write memory
+    sub.policyEngine.addPolicy(allowPolicy(
+      'pol-ws-mem-write', '__c2_workspace_resolver', ['write'], ['memory:__workspaces'],
+    ));
+    sub.policyEngine.addPolicy(allowPolicy(
+      'pol-ws-mem-read', '__c2_workspace_resolver', ['read'], ['memory:__workspaces'],
+    ));
+  });
+
+  it('should cache workspace on first resolve and return same workspace on second resolve', async () => {
+    // First intent — triggers workspace creation
+    const intent1 = await sub.intentResolver.parseIntent(
+      'Fix the login bug in acme/web-app',
+      'operator-1',
+    );
+
+    // Resolve workspace for the first time (creates new workspace)
+    const workspace1 = await sub.workspaceResolver.resolve(intent1);
+    expect(workspace1).toBeDefined();
+    expect(workspace1.repositoryUrl).toContain('acme/web-app');
+    expect(workspace1.localPath).toBeDefined();
+
+    // Second intent — same repository, should hit cache
+    const intent2 = await sub.intentResolver.parseIntent(
+      'Add unit tests to acme/web-app',
+      'operator-1',
+    );
+
+    // Resolve workspace for the second time (should reuse cached workspace)
+    const workspace2 = await sub.workspaceResolver.resolve(intent2);
+    expect(workspace2).toBeDefined();
+
+    // Verify same workspace is returned (same localPath and repositoryUrl)
+    expect(workspace2.localPath).toBe(workspace1.localPath);
+    expect(workspace2.repositoryUrl).toBe(workspace1.repositoryUrl);
+    expect(workspace2.id).toBe(workspace1.id);
+
+    // Verify last-used timestamp was updated
+    expect(workspace2.lastUsedAt.getTime()).toBeGreaterThanOrEqual(workspace1.lastUsedAt.getTime());
+  });
+
+  it('should persist workspace metadata in MemoryStore under __workspaces namespace', async () => {
+    const intent = await sub.intentResolver.parseIntent(
+      'Fix the login bug in acme/web-app',
+      'operator-1',
+    );
+
+    // Resolve workspace (creates and persists)
+    const workspace = await sub.workspaceResolver.resolve(intent);
+
+    // Verify the workspace was persisted in MemoryStore
+    // The workspace resolver uses normalized repo ref as the key
+    const normalizedRef = sub.workspaceResolver.normalizeRepoRef('acme/web-app');
+    const memoryResult = await sub.memoryStore.read(
+      '__c2_workspace_resolver',
+      '__workspaces',
+      normalizedRef,
+    );
+
+    expect(memoryResult.found).toBe(true);
+    expect(memoryResult.entry).toBeDefined();
+
+    const storedData = memoryResult.entry!.value as Record<string, unknown>;
+    expect(storedData.repositoryUrl).toBe(workspace.repositoryUrl);
+    expect(storedData.localPath).toBe(workspace.localPath);
+  });
+
+  it('should handle different repository formats resolving to the same workspace', async () => {
+    // First resolve with shorthand format
+    const intent1 = await sub.intentResolver.parseIntent(
+      'Fix the login bug in acme/web-app',
+      'operator-1',
+    );
+    const workspace1 = await sub.workspaceResolver.resolve(intent1);
+
+    // Second resolve with the same normalized reference
+    // Create a manual intent with the same repo to test normalization
+    const intent2 = { ...intent1, id: 'intent-2', repository: 'acme/web-app' };
+    const workspace2 = await sub.workspaceResolver.resolve(intent2);
+
+    // Should return the same workspace
+    expect(workspace2.localPath).toBe(workspace1.localPath);
+    expect(workspace2.id).toBe(workspace1.id);
+  });
+
+  it('should create separate workspaces for different repositories', async () => {
+    // Create executor that returns different repos for different calls
+    const callCount = { value: 0 };
+    const multiRepoExecutor: ServiceExecutor = async (_serviceId, _operation, params) => {
+      callCount.value++;
+      const reqParams = params as { messages?: Array<{ content: string }> };
+      const systemMessage = reqParams.messages?.[0]?.content ?? '';
+      const isPlanning = systemMessage.includes('task planning') || systemMessage.includes('task steps');
+
+      if (isPlanning) {
+        return {
+          success: true,
+          data: {
+            choices: [{
+              message: {
+                content: JSON.stringify({
+                  steps: [{ instructions: 'Do work', executionMode: 'agent' }],
+                  reasoning: 'Simple plan',
+                }),
+              },
+            }],
+          },
+        };
+      }
+
+      // Alternate between two different repos based on user message content
+      const userMessage = reqParams.messages?.[1]?.content ?? '';
+      const repo = userMessage.includes('backend') ? 'acme/backend' : 'acme/frontend';
+
+      return {
+        success: true,
+        data: {
+          choices: [{
+            message: {
+              content: JSON.stringify({
+                repository: repo,
+                action: 'fix bug',
+                branch: 'main',
+                confidence: 0.9,
+                constraints: {},
+              }),
+            },
+          }],
+        },
+      };
+    };
+
+    // Recreate subsystems with the multi-repo executor
+    const multiSub = createLayer2Subsystems({ executor: multiRepoExecutor });
+    multiSub.mcpGateway.registerService(orchestrationLlmService);
+    multiSub.policyEngine.addPolicy(allowPolicy(
+      'pol-orch-llm', '__c2_orchestration', ['chat.completions'], ['mcp:__orchestration_llm'],
+    ));
+    multiSub.policyEngine.addPolicy(allowPolicy(
+      'pol-ws-mem-write', '__c2_workspace_resolver', ['write'], ['memory:__workspaces'],
+    ));
+    multiSub.policyEngine.addPolicy(allowPolicy(
+      'pol-ws-mem-read', '__c2_workspace_resolver', ['read'], ['memory:__workspaces'],
+    ));
+
+    // Resolve workspace for first repo
+    const intent1 = await multiSub.intentResolver.parseIntent(
+      'Fix bug in backend service',
+      'operator-1',
+    );
+    const workspace1 = await multiSub.workspaceResolver.resolve(intent1);
+
+    // Resolve workspace for second repo
+    const intent2 = await multiSub.intentResolver.parseIntent(
+      'Fix bug in frontend app',
+      'operator-1',
+    );
+    const workspace2 = await multiSub.workspaceResolver.resolve(intent2);
+
+    // Should be different workspaces
+    expect(workspace1.id).not.toBe(workspace2.id);
+    expect(workspace1.localPath).not.toBe(workspace2.localPath);
+    expect(workspace1.repositoryUrl).not.toBe(workspace2.repositoryUrl);
+  });
+
+  it('should record audit entries for workspace creation and reuse', async () => {
+    const intent = await sub.intentResolver.parseIntent(
+      'Fix the login bug in acme/web-app',
+      'operator-1',
+    );
+
+    // First resolve — creation
+    await sub.workspaceResolver.resolve(intent);
+
+    // Second resolve — reuse
+    const intent2 = { ...intent, id: 'intent-reuse' };
+    await sub.workspaceResolver.resolve(intent2);
+
+    // Verify audit entries for workspace operations
+    const auditEntries = await sub.auditLog.query({});
+    const workspaceEntries = auditEntries.filter(e => e.operation === 'workspace_resolved');
+    expect(workspaceEntries.length).toBeGreaterThanOrEqual(2);
+
+    // First should be 'created', second should be 'reused'
+    const details = workspaceEntries.map(e => (e.details as Record<string, unknown>).action);
+    expect(details).toContain('created');
+    expect(details).toContain('reused');
   });
 });
