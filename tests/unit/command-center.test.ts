@@ -12,6 +12,21 @@ import { AgentDiscoveryRegistry } from '../../src/subsystems/agent-discovery-reg
 import { ACPAdapter } from '../../src/subsystems/acp-adapter.js';
 import { AgentCPBridge } from '../../src/subsystems/agentcp-bridge.js';
 import { OperatorInterface } from '../../src/subsystems/operator-interface.js';
+import { IntentResolver } from '../../src/subsystems/intent-resolver.js';
+import { WorkspaceResolver } from '../../src/subsystems/workspace-resolver.js';
+import { AgentSpawner } from '../../src/subsystems/agent-spawner.js';
+import { EventIngress } from '../../src/subsystems/event-ingress.js';
+import { OrchestrationSessionManager } from '../../src/subsystems/orchestration-session-manager.js';
+import { TaskPlanner } from '../../src/subsystems/task-planner.js';
+import type { OrchestrationLlmConfig } from '../../src/interfaces/orchestration-config.js';
+
+/** Minimal orchestration LLM config for tests. */
+const TEST_ORCHESTRATION_LLM: OrchestrationLlmConfig = {
+  provider: 'openai-compatible',
+  endpoint: 'http://localhost:11434',
+  model: 'test-model',
+  apiKeyRef: 'test-key',
+};
 
 describe('CommandCenter', () => {
   let cc: CommandCenter | null = null;
@@ -23,8 +38,12 @@ describe('CommandCenter', () => {
     cc = null;
   });
 
+  it('should throw when orchestrationLlm config is missing', () => {
+    expect(() => new CommandCenter()).toThrow('orchestrationLlm');
+  });
+
   it('should instantiate all subsystems with default config', () => {
-    cc = new CommandCenter();
+    cc = new CommandCenter({ orchestrationLlm: TEST_ORCHESTRATION_LLM });
 
     expect(cc.auditLog).toBeInstanceOf(AuditLog);
     expect(cc.policyEngine).toBeInstanceOf(PolicyEngine);
@@ -40,14 +59,25 @@ describe('CommandCenter', () => {
     expect(cc.operatorInterface).toBeInstanceOf(OperatorInterface);
   });
 
+  it('should instantiate all Layer 2 subsystems', () => {
+    cc = new CommandCenter({ orchestrationLlm: TEST_ORCHESTRATION_LLM });
+
+    expect(cc.intentResolver).toBeInstanceOf(IntentResolver);
+    expect(cc.workspaceResolver).toBeInstanceOf(WorkspaceResolver);
+    expect(cc.agentSpawner).toBeInstanceOf(AgentSpawner);
+    expect(cc.eventIngress).toBeInstanceOf(EventIngress);
+    expect(cc.orchestrationSessionManager).toBeInstanceOf(OrchestrationSessionManager);
+    expect(cc.taskPlanner).toBeInstanceOf(TaskPlanner);
+  });
+
   it('should not be running before start()', () => {
-    cc = new CommandCenter();
+    cc = new CommandCenter({ orchestrationLlm: TEST_ORCHESTRATION_LLM });
     expect(cc.isRunning).toBe(false);
   });
 
   it('should start and stop the WebSocket server', async () => {
     // Use a random high port to avoid conflicts.
-    cc = new CommandCenter({ port: 0 });
+    cc = new CommandCenter({ port: 0, orchestrationLlm: TEST_ORCHESTRATION_LLM });
     expect(cc.isRunning).toBe(false);
 
     await cc.start();
@@ -58,7 +88,7 @@ describe('CommandCenter', () => {
   });
 
   it('should be idempotent on start() when already running', async () => {
-    cc = new CommandCenter({ port: 0 });
+    cc = new CommandCenter({ port: 0, orchestrationLlm: TEST_ORCHESTRATION_LLM });
     await cc.start();
     // Calling start again should not throw.
     await cc.start();
@@ -66,7 +96,7 @@ describe('CommandCenter', () => {
   });
 
   it('should be idempotent on stop() when not running', async () => {
-    cc = new CommandCenter();
+    cc = new CommandCenter({ orchestrationLlm: TEST_ORCHESTRATION_LLM });
     // Calling stop before start should not throw.
     await cc.stop();
     expect(cc.isRunning).toBe(false);
@@ -80,7 +110,7 @@ describe('CommandCenter', () => {
       return undefined;
     };
 
-    cc = new CommandCenter({ authenticate });
+    cc = new CommandCenter({ authenticate, orchestrationLlm: TEST_ORCHESTRATION_LLM });
     expect(cc.operatorInterface).toBeInstanceOf(OperatorInterface);
   });
 
@@ -90,6 +120,7 @@ describe('CommandCenter', () => {
       maxConcurrentSessions: 5,
       maxMessageSize: 2048,
       heartbeatIntervalMs: 15_000,
+      orchestrationLlm: TEST_ORCHESTRATION_LLM,
     });
 
     // Verify the session manager respects the max concurrent sessions.
@@ -99,7 +130,7 @@ describe('CommandCenter', () => {
   });
 
   it('should terminate active sessions on stop()', async () => {
-    cc = new CommandCenter({ port: 0, maxConcurrentSessions: 10 });
+    cc = new CommandCenter({ port: 0, maxConcurrentSessions: 10, orchestrationLlm: TEST_ORCHESTRATION_LLM });
     await cc.start();
 
     // Create a session via the session manager.

@@ -3,10 +3,19 @@ import http from 'http';
 import { CommandCenter } from '../../src/command-center.js';
 import type { OperatorCredentials } from '../../src/subsystems/operator-interface.js';
 import type { ACPAgentCard } from '../../src/interfaces/acp-adapter.js';
+import type { OrchestrationLlmConfig } from '../../src/interfaces/orchestration-config.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** Minimal orchestration LLM config for tests. */
+const TEST_ORCHESTRATION_LLM: OrchestrationLlmConfig = {
+  provider: 'openai-compatible',
+  endpoint: 'http://localhost:11434',
+  model: 'test-model',
+  apiKeyRef: 'test-key',
+};
 
 /** Simple HTTP request helper that returns status, headers, and parsed JSON body. */
 function httpRequest(
@@ -167,6 +176,7 @@ describe('CommandCenter ACP REST endpoints', () => {
       port: 0,
       authenticate: testAuthenticate,
       maxConcurrentSessions: 10,
+      orchestrationLlm: TEST_ORCHESTRATION_LLM,
     });
     await cc.start();
     const addr = cc.address;
