@@ -1056,11 +1056,28 @@ export class CommandCenter {
         { sessionId },
       );
 
-      // If the LLM returned zero confidence or an empty action, the message
-      // is likely conversational (not an actionable intent). Let it fall through
-      // to the default handler rather than entering a clarification loop.
-      if (intent.confidence === 0 || (!intent.action || intent.action === '' || intent.action.startsWith('Unable to parse'))) {
-        return false;
+      // If the LLM returned zero confidence with an error-like action,
+      // the LLM call likely failed. Report the issue to the operator
+      // rather than showing the generic "no agent" message.
+      if (intent.confidence === 0) {
+        if (intent.action.startsWith('Unable to parse intent:')) {
+          // LLM service issue — report it clearly
+          this._operatorInterface.postSystemMessage(
+            sessionId,
+            `I couldn't process your message. ${intent.action.replace('Unable to parse intent: ', '')}. ` +
+            `Please check that the orchestration LLM endpoint is running and accessible.`,
+          );
+          return true;
+        }
+        if (!intent.action || intent.action === '') {
+          // Truly empty — the LLM returned nothing useful
+          this._operatorInterface.postSystemMessage(
+            sessionId,
+            `I received your message but couldn't determine what action to take. ` +
+            `Could you rephrase with more detail? For example: "Fix the login bug in owner/repo" or "Add pagination to the /users endpoint in myorg/my-app"`,
+          );
+          return true;
+        }
       }
 
       // Check confidence threshold.
