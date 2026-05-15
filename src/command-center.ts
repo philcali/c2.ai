@@ -207,6 +207,37 @@ export class CommandCenter {
       policyEngine: this._policyEngine,
       auditLog: this._auditLog,
       antiLeakage: this._antiLeakage,
+      executor: async (serviceId, operation, params, serviceConfig) => {
+        // Make a real HTTP call to the service endpoint for LLM operations.
+        if (operation === 'chat.completions') {
+          const url = `${serviceConfig.endpoint}/chat/completions`;
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${serviceConfig.credentialRef}`,
+            },
+            body: JSON.stringify(params),
+          });
+
+          if (!response.ok) {
+            const errorText = await response.text().catch(() => 'Unknown error');
+            return {
+              success: false,
+              error: {
+                code: 'LLM_REQUEST_FAILED',
+                message: `LLM request failed with status ${response.status}: ${errorText}`,
+              },
+            };
+          }
+
+          const data = await response.json();
+          return { success: true, data };
+        }
+
+        // For non-LLM operations, return a default success.
+        return { success: true, data: { message: 'Operation executed' } };
+      },
     });
 
     // 4. Protocol adapters (depend on multiple subsystems)
@@ -266,6 +297,26 @@ export class CommandCenter {
         'Provide an orchestrationLlm field in CommandCenterConfig with provider, endpoint, model, and apiKeyRef.',
       );
     }
+
+    // Register the orchestration LLM as a service in the MCP Gateway so that
+    // IntentResolver and TaskPlanner can route inference calls through it.
+    this._mcpGateway.registerService({
+      id: '__orchestration_llm',
+      name: 'Orchestration LLM',
+      endpoint: config.orchestrationLlm.endpoint,
+      credentialRef: config.orchestrationLlm.apiKeyRef,
+      rateLimits: { perAgent: 100, perService: 500, windowMs: 60_000 },
+    });
+
+    // Add a policy allowing the C2 orchestration agent to use the LLM service.
+    this._policyEngine.addPolicy({
+      id: '__orchestration_llm_access',
+      version: 1,
+      agentId: '__c2_orchestration',
+      operations: ['chat.completions'],
+      resources: ['mcp:__orchestration_llm'],
+      effect: 'allow',
+    });
 
     // Instantiate in dependency order:
     // WorkspaceResolver → AgentSpawner → IntentResolver → TaskPlanner → OrchestrationSessionManager → EventIngress
@@ -1005,20 +1056,37 @@ export class CommandCenter {
         { sessionId },
       );
 
+      // If the LLM returned zero confidence or an empty action, the message
+      // is likely conversational (not an actionable intent). Let it fall through
+      // to the default handler rather than entering a clarification loop.
+      if (intent.confidence === 0 || (!intent.action || intent.action === '' || intent.action.startsWith('Unable to parse'))) {
+        return false;
+      }
+
       // Check confidence threshold.
       const threshold = this._intentResolver.getConfidenceThreshold();
       if (intent.confidence < threshold) {
         // Low confidence — send a clarification message back to the session.
-        const reason = !intent.repository
-          ? 'Could not determine target repository'
-          : !intent.action || intent.action === ''
-            ? 'Could not determine desired action'
-            : 'Low confidence in interpretation';
+        // But only if we have *something* to work with (partial intent).
+        const missingParts: string[] = [];
+        if (!intent.repository) {
+          missingParts.push('target repository');
+        }
+        if (!intent.action || intent.action === '') {
+          missingParts.push('desired action');
+        }
 
-        const clarification = await this._intentResolver.requestClarification(intent, reason);
+        let clarificationMessage: string;
+        if (missingParts.length > 0) {
+          clarificationMessage = `I understood you want to: "${intent.action}"${intent.repository ? ` on ${intent.repository}` : ''}. `
+            + `However, I still need: ${missingParts.join(', ')}. `
+            + `Could you provide the missing details? For example: "Fix the login bug in owner/repo on the main branch"`;
+        } else {
+          clarificationMessage = `I interpreted your request as: "${intent.action}"${intent.repository ? ` on ${intent.repository}` : ''} `
+            + `(confidence: ${Math.round(intent.confidence * 100)}%). Can you confirm this is correct, or rephrase with more detail?`;
+        }
 
-        // Post the clarification as a system message in the session.
-        this._operatorInterface.postSystemMessage(sessionId, clarification.question);
+        this._operatorInterface.postSystemMessage(sessionId, clarificationMessage);
         return true;
       }
 
