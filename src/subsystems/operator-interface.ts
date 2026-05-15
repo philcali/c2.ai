@@ -142,6 +142,17 @@ export class OperatorInterface implements IOperatorInterface {
   /** In-memory chat message storage per session. */
   private readonly sessionMessages: Map<string, Array<{ type: string; id: string; content: string; timestamp: string }>> = new Map();
 
+  /**
+   * Optional message handler callback. When set, operator messages are routed
+   * through this handler (e.g., for Layer 2 intent-driven orchestration) instead
+   * of producing the default "no agent connected" system reply.
+   *
+   * The handler receives the session ID, message content, and operator ID.
+   * It should return `true` if it handled the message, or `false` to fall back
+   * to the default behavior.
+   */
+  private _messageHandler: ((sessionId: string, content: string, operatorId: string) => Promise<boolean>) | null = null;
+
   constructor(options: {
     sessionManager: ISessionManager;
     policyEngine: IPolicyEngine;
@@ -156,6 +167,41 @@ export class OperatorInterface implements IOperatorInterface {
     this.auditLog = options.auditLog;
     this.authenticate = options.authenticate;
     this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? 30_000;
+  }
+
+  /**
+   * Set a message handler that intercepts operator messages before the default
+   * "no agent connected" reply. Used by the CommandCenter to route messages
+   * through the Intent_Resolver for orchestration.
+   */
+  setMessageHandler(handler: (sessionId: string, content: string, operatorId: string) => Promise<boolean>): void {
+    this._messageHandler = handler;
+  }
+
+  /**
+   * Post a system message into a session's chat history and broadcast it
+   * to subscribers. Used by the CommandCenter to send orchestration status
+   * updates back to the operator.
+   */
+  postSystemMessage(sessionId: string, content: string): void {
+    const systemMessage = {
+      type: 'system',
+      id: uuidv4(),
+      content,
+      timestamp: new Date().toISOString(),
+    };
+
+    if (!this.sessionMessages.has(sessionId)) {
+      this.sessionMessages.set(sessionId, []);
+    }
+    this.sessionMessages.get(sessionId)!.push(systemMessage);
+
+    this.broadcastEvent(`session:${sessionId}`, {
+      channel: `session:${sessionId}`,
+      type: 'new_message',
+      data: systemMessage,
+      timestamp: new Date(),
+    });
   }
 
   // ==================================================================
@@ -958,8 +1004,15 @@ export class OperatorInterface implements IOperatorInterface {
       timestamp: new Date(),
     });
 
-    // If no agent is connected to this session, send a system message
-    // indicating the message was received but no agent is available.
+    // If a message handler is registered (Layer 2 orchestration), route through it.
+    if (this._messageHandler) {
+      const handled = await this._messageHandler(sessionId, body.content, request.operatorId);
+      if (handled) {
+        return { status: 201, body: { data: message } };
+      }
+    }
+
+    // No handler or handler declined — send the default "no agent" system message.
     const systemReply = {
       type: 'system',
       id: uuidv4(),

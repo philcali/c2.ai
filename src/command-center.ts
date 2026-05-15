@@ -312,6 +312,13 @@ export class CommandCenter {
       policyEngine: this._policyEngine,
       auditLog: this._auditLog,
     });
+
+    // 9. Wire operator chat messages to Layer 2 orchestration.
+    // When an operator sends a message in a session, route it through the
+    // IntentResolver to create an orchestration session automatically.
+    this._operatorInterface.setMessageHandler(async (sessionId, content, operatorId) => {
+      return this.handleOrchestrationMessage(sessionId, content, operatorId);
+    });
   }
 
   // ------------------------------------------------------------------
@@ -974,6 +981,70 @@ export class CommandCenter {
     advanceLoop().catch(() => {
       // Swallow unhandled rejections; session state captures the failure.
     });
+  }
+
+  /**
+   * Handle an operator message from a chat session by routing it through
+   * the Layer 2 Intent_Resolver. This is called by the OperatorInterface's
+   * message handler callback.
+   *
+   * Returns `true` if the message was handled (orchestration session created
+   * or clarification sent), `false` if it should fall back to the default
+   * "no agent connected" behavior.
+   */
+  private async handleOrchestrationMessage(
+    sessionId: string,
+    content: string,
+    operatorId: string,
+  ): Promise<boolean> {
+    try {
+      // Parse the intent via IntentResolver.
+      const intent = await this._intentResolver.parseIntent(
+        content,
+        operatorId,
+        { sessionId },
+      );
+
+      // Check confidence threshold.
+      const threshold = this._intentResolver.getConfidenceThreshold();
+      if (intent.confidence < threshold) {
+        // Low confidence — send a clarification message back to the session.
+        const reason = !intent.repository
+          ? 'Could not determine target repository'
+          : !intent.action || intent.action === ''
+            ? 'Could not determine desired action'
+            : 'Low confidence in interpretation';
+
+        const clarification = await this._intentResolver.requestClarification(intent, reason);
+
+        // Post the clarification as a system message in the session.
+        this._operatorInterface.postSystemMessage(sessionId, clarification.question);
+        return true;
+      }
+
+      // Confidence is sufficient — create an orchestration session.
+      const orchestrationSession = await this._orchestrationSessionManager.createSession(intent, operatorId);
+
+      // Notify the operator that orchestration has started.
+      const statusMessage = orchestrationSession.state === 'pending_approval'
+        ? `Orchestration session created but requires approval. Action: ${intent.action}${intent.repository ? ` on ${intent.repository}` : ''}`
+        : `Starting orchestration: ${intent.action}${intent.repository ? ` on ${intent.repository}` : ''}`;
+
+      this._operatorInterface.postSystemMessage(sessionId, statusMessage);
+
+      // If the session is not pending approval, begin advancing it.
+      if (orchestrationSession.state !== 'pending_approval') {
+        this.advanceSessionAsync(orchestrationSession.id);
+      }
+
+      return true;
+    } catch (err) {
+      // On error, post the error as a system message and return true
+      // (we handled it, just with an error).
+      const message = err instanceof Error ? err.message : 'Failed to process intent';
+      this._operatorInterface.postSystemMessage(sessionId, `Orchestration error: ${message}`);
+      return true;
+    }
   }
 
   // ------------------------------------------------------------------
