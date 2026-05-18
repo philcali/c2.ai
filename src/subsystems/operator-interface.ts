@@ -996,14 +996,6 @@ export class OperatorInterface implements IOperatorInterface {
     }
     this.sessionMessages.get(sessionId)!.push(message);
 
-    // Broadcast the new message to subscribers of this session's channel.
-    this.broadcastEvent(`session:${sessionId}`, {
-      channel: `session:${sessionId}`,
-      type: 'new_message',
-      data: message,
-      timestamp: new Date(),
-    });
-
     // If a message handler is registered (Layer 2 orchestration), route through it.
     if (this._messageHandler) {
       const handled = await this._messageHandler(sessionId, body.content, request.operatorId);

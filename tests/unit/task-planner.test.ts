@@ -227,7 +227,6 @@ describe('TaskPlanner', () => {
       expect(params).toMatchObject({
         model: 'gpt-4',
         temperature: 0.3,
-        response_format: { type: 'json_object' },
       });
     });
 

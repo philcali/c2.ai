@@ -93,7 +93,6 @@ export class IntentResolver implements IIntentResolver {
         ],
         temperature: this.orchestrationLlmConfig.temperature ?? 0.3,
         max_tokens: this.orchestrationLlmConfig.maxTokens ?? 1024,
-        response_format: { type: 'json_object' },
       },
     );
 
@@ -158,7 +157,6 @@ export class IntentResolver implements IIntentResolver {
         ],
         temperature: this.orchestrationLlmConfig.temperature ?? 0.3,
         max_tokens: this.orchestrationLlmConfig.maxTokens ?? 512,
-        response_format: { type: 'json_object' },
       },
     );
 
