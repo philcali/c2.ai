@@ -14,9 +14,12 @@ import type {
  * Orchestration_Session lifecycle, providing uniform traceability and control.
  *
  * State machine:
- *   intent_received → resolving_workspace → spawning_agent → planning_task → executing → completed|failed
+ *   intent_received → resolving_workspace → spawning_agent → planning_task → awaiting_plan_approval → executing → completed|failed
+ *   planning_task → executing (auto-advance mode)
  *   intent_received → pending_approval (for platform events denied by guardrails)
  *   pending_approval → resolving_workspace (after operator approval)
+ *   awaiting_plan_approval → planning_task (on modify)
+ *   awaiting_plan_approval → failed (on reject/cancel/timeout)
  *   Any non-terminal state → failed (on cancel or unrecoverable error)
  *
  * Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 7.1, 7.3, 7.4, 7.5
@@ -116,4 +119,52 @@ export interface IOrchestrationSessionManager {
    * @param handler - Callback invoked on each session event
    */
   onSessionEvent(handler: (event: OrchestrationEvent) => void): void;
+
+  /**
+   * Approve the plan for a session in 'awaiting_plan_approval' state.
+   *
+   * Submits the stored plan to the TaskOrchestrator and transitions
+   * the session to 'executing'.
+   *
+   * @param sessionId - The ID of the session whose plan to approve
+   * @param operatorId - The operator approving the plan
+   * @returns The updated session after plan approval
+   * @throws Error if the session is not in 'awaiting_plan_approval' state
+   */
+  approvePlan(sessionId: string, operatorId: string): Promise<OrchestrationSession>;
+
+  /**
+   * Request plan modification for a session in 'awaiting_plan_approval' state.
+   *
+   * Parses the modification instructions, transitions back to 'planning_task',
+   * regenerates the plan, and returns to 'awaiting_plan_approval' with the revised plan.
+   *
+   * @param sessionId - The ID of the session whose plan to modify
+   * @param modificationInstructions - Natural language instructions describing the desired changes
+   * @param operatorId - The operator requesting the modification
+   * @returns The updated session with the revised plan
+   * @throws Error if the session is not in 'awaiting_plan_approval' state
+   */
+  modifyPlan(
+    sessionId: string,
+    modificationInstructions: string,
+    operatorId: string,
+  ): Promise<OrchestrationSession>;
+
+  /**
+   * Reject the plan for a session in 'awaiting_plan_approval' state.
+   *
+   * Transitions the session to 'failed' with the rejection reason recorded.
+   *
+   * @param sessionId - The ID of the session whose plan to reject
+   * @param reason - The reason for rejecting the plan
+   * @param operatorId - The operator rejecting the plan
+   * @returns The updated session after plan rejection
+   * @throws Error if the session is not in 'awaiting_plan_approval' state
+   */
+  rejectPlan(
+    sessionId: string,
+    reason: string,
+    operatorId: string,
+  ): Promise<OrchestrationSession>;
 }

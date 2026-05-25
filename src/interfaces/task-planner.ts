@@ -39,4 +39,19 @@ export interface ITaskPlanner {
     agentId: string,
     operatorId: string,
   ): Promise<string>;
+
+  /**
+   * Regenerate a plan incorporating operator modification instructions.
+   * Uses the previous plan and modification context to produce a revised plan.
+   *
+   * @param context - The planning context including intent, workspace, and agent capabilities
+   * @param previousPlan - The previously generated plan to revise
+   * @param modificationInstructions - Natural language instructions from the operator
+   * @returns A regenerated plan incorporating the modifications
+   */
+  regeneratePlan(
+    context: PlanningContext,
+    previousPlan: GeneratedPlan,
+    modificationInstructions: string,
+  ): Promise<GeneratedPlan>;
 }

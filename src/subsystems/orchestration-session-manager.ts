@@ -18,6 +18,7 @@ import type {
   OrchestrationLlmConfig,
   PlanningContext,
   GeneratedPlan,
+  PlanRevisionEntry,
 } from '../interfaces/orchestration-config.js';
 import type { CapabilityRequirements } from '../interfaces/agent-connector.js';
 import type { TaskStepDefinition } from '../interfaces/task-orchestrator.js';
@@ -31,7 +32,11 @@ import type { TaskStepDefinition } from '../interfaces/task-orchestrator.js';
  *   pending_approval → resolving_workspace (after operator approval)
  *   resolving_workspace → spawning_agent
  *   spawning_agent → planning_task
- *   planning_task → executing
+ *   planning_task → awaiting_plan_approval (manual review mode, default)
+ *   planning_task → executing (auto-advance mode)
+ *   awaiting_plan_approval → executing (operator approves plan)
+ *   awaiting_plan_approval → planning_task (operator requests modification)
+ *   awaiting_plan_approval → failed (operator rejects, cancels, or timeout)
  *   executing → completed
  *   Any non-terminal → failed
  */
@@ -40,7 +45,8 @@ const VALID_TRANSITIONS: Record<OrchestrationState, OrchestrationState[]> = {
   pending_approval: ['resolving_workspace', 'failed'],
   resolving_workspace: ['spawning_agent', 'failed'],
   spawning_agent: ['planning_task', 'failed'],
-  planning_task: ['executing', 'failed'],
+  planning_task: ['awaiting_plan_approval', 'executing', 'failed'],
+  awaiting_plan_approval: ['executing', 'planning_task', 'failed'],
   executing: ['completed', 'failed'],
   completed: [],
   failed: [],
@@ -72,6 +78,11 @@ export interface ITaskPlannerMinimal {
     agentId: string,
     operatorId: string,
   ): Promise<string>;
+  regeneratePlan(
+    context: PlanningContext,
+    previousPlan: GeneratedPlan,
+    modificationInstructions: string,
+  ): Promise<GeneratedPlan>;
 }
 
 
@@ -241,6 +252,12 @@ export class OrchestrationSessionManager implements IOrchestrationSessionManager
       );
     }
 
+    if (session.state === 'awaiting_plan_approval') {
+      throw new Error(
+        `Cannot advance session ${sessionId}: session is awaiting plan approval. Use approvePlan(), modifyPlan(), or rejectPlan() to proceed.`,
+      );
+    }
+
     try {
       switch (session.state) {
         case 'intent_received':
@@ -372,6 +389,301 @@ export class OrchestrationSessionManager implements IOrchestrationSessionManager
   }
 
   // ------------------------------------------------------------------
+  // IOrchestrationSessionManager — Plan Lifecycle
+  // ------------------------------------------------------------------
+
+  /**
+   * Approve the plan for a session in 'awaiting_plan_approval' state.
+   *
+   * Submits the stored plan to the TaskOrchestrator and transitions
+   * the session to 'executing'.
+   *
+   * Requirements: 2.1, 2.2, 2.5, 7.2, 8.4
+   */
+  async approvePlan(
+    sessionId: string,
+    operatorId: string,
+  ): Promise<OrchestrationSession> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw new Error(`Orchestration session not found: ${sessionId}`);
+    }
+
+    if (session.state !== 'awaiting_plan_approval') {
+      throw new Error(
+        `Cannot approve plan for session ${sessionId}: not in 'awaiting_plan_approval' state (current: '${session.state}')`,
+      );
+    }
+
+    if (!session.currentPlan) {
+      throw new Error(
+        `Cannot approve plan for session ${sessionId}: no plan stored on session`,
+      );
+    }
+
+    // Submit the stored plan via taskPlanner.
+    const codingTaskId = await this.taskPlanner.submitPlan(
+      session.currentPlan,
+      session.agentId!,
+      operatorId,
+    );
+    session.codingTaskId = codingTaskId;
+
+    // Transition to executing.
+    await this.transitionState(sessionId, 'executing', {
+      codingTaskId,
+      planId: session.currentPlan.planId,
+      approvedBy: operatorId,
+    });
+
+    // Emit plan_approved WebSocket event.
+    this.operatorInterface.broadcastEvent(`session:${sessionId}`, {
+      channel: `session:${sessionId}`,
+      type: 'plan_approved',
+      data: {
+        sessionId,
+        operatorId,
+        codingTaskId,
+        planId: session.currentPlan.planId,
+      },
+      timestamp: new Date(),
+    });
+
+    // Record approval in audit log.
+    await this.auditLog.record({
+      sequenceNumber: 0,
+      timestamp: new Date(),
+      operatorId,
+      eventType: 'operator_action',
+      operation: 'plan_approved',
+      resource: `orchestration_session:${sessionId}`,
+      details: {
+        orchestrationSessionId: sessionId,
+        planId: session.currentPlan.planId,
+        approvedBy: operatorId,
+        stepCount: session.currentPlan.steps.length,
+        revisionNumber: session.planRevisionHistory?.length ?? 1,
+      },
+    });
+
+    return this.sessions.get(sessionId)!;
+  }
+
+  /**
+   * Request plan modification for a session in 'awaiting_plan_approval' state.
+   *
+   * Transitions back to planning_task, regenerates the plan with modification
+   * instructions, then returns to awaiting_plan_approval with the revised plan.
+   *
+   * Requirements: 2.3, 2.5, 2.6, 5.2, 7.3, 8.2, 8.3
+   */
+  async modifyPlan(
+    sessionId: string,
+    modificationInstructions: string,
+    operatorId: string,
+  ): Promise<OrchestrationSession> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw new Error(`Orchestration session not found: ${sessionId}`);
+    }
+
+    if (session.state !== 'awaiting_plan_approval') {
+      throw new Error(
+        `Cannot modify plan for session ${sessionId}: not in 'awaiting_plan_approval' state (current: '${session.state}')`,
+      );
+    }
+
+    if (!session.currentPlan) {
+      throw new Error(
+        `Cannot modify plan for session ${sessionId}: no plan stored on session`,
+      );
+    }
+
+    const previousPlan = session.currentPlan;
+    const previousPlanId = previousPlan.planId;
+
+    // Emit plan_regenerating WebSocket event.
+    this.operatorInterface.broadcastEvent(`session:${sessionId}`, {
+      channel: `session:${sessionId}`,
+      type: 'plan_regenerating',
+      data: {
+        sessionId,
+        operatorId,
+        modificationInstructions,
+      },
+      timestamp: new Date(),
+    });
+
+    // Transition to planning_task (intermediate state during regeneration).
+    await this.transitionState(sessionId, 'planning_task', {
+      reason: 'plan_modification',
+      modificationInstructions,
+    });
+
+    try {
+      // Build planning context for regeneration.
+      const requirements = this.deriveCapabilityRequirements(session.intent);
+      const planningContext: PlanningContext = {
+        intent: session.intent,
+        workspace: session.workspaceContext!,
+        agentCapabilities: requirements,
+      };
+
+      // Regenerate the plan with modification instructions.
+      const newPlan = await this.taskPlanner.regeneratePlan(
+        planningContext,
+        previousPlan,
+        modificationInstructions,
+      );
+
+      // Store previous plan in revision history with modification instructions.
+      if (!session.planRevisionHistory) {
+        session.planRevisionHistory = [];
+      }
+      // Update the last entry to include modification instructions (it was the previous current plan).
+      const lastEntry = session.planRevisionHistory[session.planRevisionHistory.length - 1];
+      if (lastEntry) {
+        lastEntry.modificationInstructions = modificationInstructions;
+      }
+
+      // Store new plan as currentPlan with a new planId.
+      const newPlanId = uuidv4();
+      session.currentPlan = { ...newPlan, planId: newPlanId };
+
+      // Add new plan to revision history.
+      session.planRevisionHistory.push({
+        planId: newPlanId,
+        plan: newPlan,
+        generatedAt: new Date(),
+      });
+
+      // Transition back to awaiting_plan_approval.
+      session.planEnteredAt = new Date();
+      await this.transitionState(sessionId, 'awaiting_plan_approval', {
+        planId: newPlanId,
+        stepCount: newPlan.steps.length,
+        revisionNumber: session.planRevisionHistory.length,
+      });
+
+      // Emit plan_revised WebSocket event.
+      this.operatorInterface.broadcastEvent(`session:${sessionId}`, {
+        channel: `session:${sessionId}`,
+        type: 'plan_revised',
+        data: {
+          sessionId,
+          operatorId,
+          plan: {
+            planId: newPlanId,
+            steps: newPlan.steps.map((s) => ({
+              instructions: s.instructions,
+              executionMode: s.executionMode,
+            })),
+            reasoning: newPlan.reasoning,
+            estimatedDuration: newPlan.estimatedDuration,
+          },
+          revisionNumber: session.planRevisionHistory.length,
+          previousPlanId,
+        },
+        timestamp: new Date(),
+      });
+
+      // Record modification in audit log.
+      await this.auditLog.record({
+        sequenceNumber: 0,
+        timestamp: new Date(),
+        operatorId,
+        eventType: 'operator_action',
+        operation: 'plan_modified',
+        resource: `orchestration_session:${sessionId}`,
+        details: {
+          orchestrationSessionId: sessionId,
+          planId: newPlanId,
+          previousPlanId,
+          modificationInstructions,
+          stepCount: newPlan.steps.length,
+          revisionNumber: session.planRevisionHistory.length,
+        },
+      });
+    } catch (error) {
+      // Handle regeneratePlan failure by transitioning to failed.
+      const reason = error instanceof Error ? error.message : String(error);
+      session.failureReason = `Plan regeneration failed: ${reason}`;
+      await this.transitionState(sessionId, 'failed', {
+        reason: session.failureReason,
+        previousPlanId,
+      });
+    }
+
+    return this.sessions.get(sessionId)!;
+  }
+
+  /**
+   * Reject the plan for a session in 'awaiting_plan_approval' state.
+   *
+   * Transitions the session to 'failed' with the rejection reason recorded.
+   *
+   * Requirements: 2.4, 4.5, 7.4, 8.5
+   */
+  async rejectPlan(
+    sessionId: string,
+    reason: string,
+    operatorId: string,
+  ): Promise<OrchestrationSession> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw new Error(`Orchestration session not found: ${sessionId}`);
+    }
+
+    if (session.state !== 'awaiting_plan_approval') {
+      throw new Error(
+        `Cannot reject plan for session ${sessionId}: not in 'awaiting_plan_approval' state (current: '${session.state}')`,
+      );
+    }
+
+    // Set failure reason.
+    session.failureReason = reason;
+
+    // Transition to failed.
+    await this.transitionState(sessionId, 'failed', {
+      reason,
+      rejectedBy: operatorId,
+      planId: session.currentPlan?.planId,
+    });
+
+    // Emit plan_rejected WebSocket event.
+    this.operatorInterface.broadcastEvent(`session:${sessionId}`, {
+      channel: `session:${sessionId}`,
+      type: 'plan_rejected',
+      data: {
+        sessionId,
+        operatorId,
+        reason,
+        planId: session.currentPlan?.planId,
+      },
+      timestamp: new Date(),
+    });
+
+    // Record rejection in audit log.
+    await this.auditLog.record({
+      sequenceNumber: 0,
+      timestamp: new Date(),
+      operatorId,
+      eventType: 'operator_action',
+      operation: 'plan_rejected',
+      resource: `orchestration_session:${sessionId}`,
+      details: {
+        orchestrationSessionId: sessionId,
+        planId: session.currentPlan?.planId,
+        rejectedBy: operatorId,
+        rejectionReason: reason,
+        revisionNumber: session.planRevisionHistory?.length ?? 1,
+      },
+    });
+
+    return this.sessions.get(sessionId)!;
+  }
+
+  // ------------------------------------------------------------------
   // IOrchestrationSessionManager — Query
   // ------------------------------------------------------------------
 
@@ -478,9 +790,13 @@ export class OrchestrationSessionManager implements IOrchestrationSessionManager
   }
 
   /**
-   * Advance from planning_task → executing.
+   * Advance from planning_task → awaiting_plan_approval (manual) or executing (auto-advance).
    *
-   * Generates a task plan and submits it to the Task_Orchestrator.
+   * Generates a task plan via the TaskPlanner. Based on operator preferences:
+   * - Manual review (default): stores plan on session, transitions to awaiting_plan_approval
+   * - Auto-advance: submits plan immediately, transitions to executing
+   *
+   * Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 3.1, 3.2, 3.3, 3.4
    */
   private async advanceFromPlanningTask(session: OrchestrationSession): Promise<void> {
     if (!session.workspaceContext || !session.agentId) {
@@ -496,18 +812,108 @@ export class OrchestrationSessionManager implements IOrchestrationSessionManager
     };
 
     const plan = await this.taskPlanner.generatePlan(planningContext);
-    const codingTaskId = await this.taskPlanner.submitPlan(
+
+    // Handle empty plan (0 steps) by transitioning to failed.
+    if (!plan.steps || plan.steps.length === 0) {
+      session.failureReason = 'Plan generation produced an empty plan with no steps';
+      await this.transitionState(session.id, 'failed', {
+        reason: session.failureReason,
+      });
+      return;
+    }
+
+    // Store the plan on the session with a unique planId.
+    const planId = uuidv4();
+    session.currentPlan = { ...plan, planId };
+
+    // Initialize plan revision history.
+    const revisionEntry: PlanRevisionEntry = {
+      planId,
       plan,
-      session.agentId,
-      session.operatorId,
-    );
+      generatedAt: new Date(),
+    };
+    session.planRevisionHistory = [revisionEntry];
 
-    session.codingTaskId = codingTaskId;
+    // Check operator preferences for review mode.
+    const reviewMode = planningContext.operatorPreferences?.reviewMode;
 
-    await this.transitionState(session.id, 'executing', {
-      codingTaskId,
-      stepCount: plan.steps.length,
-    });
+    if (reviewMode === 'auto-advance') {
+      // Auto-advance: submit plan immediately and transition to executing.
+      const codingTaskId = await this.taskPlanner.submitPlan(
+        plan,
+        session.agentId,
+        session.operatorId,
+      );
+      session.codingTaskId = codingTaskId;
+
+      await this.transitionState(session.id, 'executing', {
+        codingTaskId,
+        stepCount: plan.steps.length,
+        autoAdvanced: true,
+      });
+
+      // Emit plan_approved event for informational purposes.
+      this.operatorInterface.broadcastEvent(`session:${session.id}`, {
+        channel: `session:${session.id}`,
+        type: 'plan_approved',
+        data: {
+          sessionId: session.id,
+          operatorId: session.operatorId,
+          codingTaskId,
+          planId,
+          autoAdvanced: true,
+        },
+        timestamp: new Date(),
+      });
+
+      // Record auto-advance audit entry.
+      await this.auditLog.record({
+        sequenceNumber: 0,
+        timestamp: new Date(),
+        operatorId: session.operatorId,
+        eventType: 'session_lifecycle',
+        operation: 'plan_auto_approved',
+        resource: `orchestration_session:${session.id}`,
+        details: {
+          orchestrationSessionId: session.id,
+          planId,
+          stepCount: plan.steps.length,
+          reasoning: plan.reasoning,
+          estimatedDuration: plan.estimatedDuration,
+          autoAdvanced: true,
+          revisionNumber: 1,
+        },
+      });
+    } else {
+      // Manual review (default): transition to awaiting_plan_approval.
+      session.planEnteredAt = new Date();
+
+      await this.transitionState(session.id, 'awaiting_plan_approval', {
+        planId,
+        stepCount: plan.steps.length,
+      });
+
+      // Emit plan_ready event.
+      this.operatorInterface.broadcastEvent(`session:${session.id}`, {
+        channel: `session:${session.id}`,
+        type: 'plan_ready',
+        data: {
+          sessionId: session.id,
+          operatorId: session.operatorId,
+          plan: {
+            planId,
+            steps: plan.steps.map((s) => ({
+              instructions: s.instructions,
+              executionMode: s.executionMode,
+            })),
+            reasoning: plan.reasoning,
+            estimatedDuration: plan.estimatedDuration,
+          },
+          revisionNumber: 1,
+        },
+        timestamp: new Date(),
+      });
+    }
   }
 
   /**

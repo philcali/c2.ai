@@ -134,6 +134,17 @@ function createMockTaskPlanner(): ITaskPlannerMinimal {
     async submitPlan(plan, agentId, operatorId): Promise<string> {
       return `task-${agentId.slice(0, 8)}`;
     },
+    async regeneratePlan(context, previousPlan, modificationInstructions): Promise<GeneratedPlan> {
+      return {
+        steps: [
+          {
+            instructions: `Modified: ${modificationInstructions}`,
+            executionMode: 'agent',
+          },
+        ],
+        reasoning: 'Regenerated from modification instructions',
+      };
+    },
   };
 }
 
@@ -198,7 +209,8 @@ const VALID_TRANSITIONS: Record<OrchestrationState, OrchestrationState[]> = {
   pending_approval: ['resolving_workspace', 'failed'],
   resolving_workspace: ['spawning_agent', 'failed'],
   spawning_agent: ['planning_task', 'failed'],
-  planning_task: ['executing', 'failed'],
+  planning_task: ['awaiting_plan_approval', 'executing', 'failed'],
+  awaiting_plan_approval: ['executing', 'planning_task', 'failed'],
   executing: ['completed', 'failed'],
   completed: [],
   failed: [],
@@ -244,7 +256,11 @@ describe('Orchestration Session Manager Property Tests', () => {
             let current = session;
             while (current.state !== 'completed' && current.state !== 'failed') {
               const prevState = current.state;
-              current = await manager.advance(current.id);
+              if (current.state === 'awaiting_plan_approval') {
+                current = await manager.approvePlan(current.id, operatorId);
+              } else {
+                current = await manager.advance(current.id);
+              }
               transitions.push({ from: prevState, to: current.state });
             }
 
@@ -319,6 +335,7 @@ describe('Orchestration Session Manager Property Tests', () => {
         'resolving_workspace',
         'spawning_agent',
         'planning_task',
+        'awaiting_plan_approval',
         'executing',
       ];
 
@@ -371,12 +388,17 @@ describe('Orchestration Session Manager Property Tests', () => {
                 'resolving_workspace',
                 'spawning_agent',
                 'planning_task',
+                'awaiting_plan_approval',
                 'executing',
               ];
               const targetIdx = stateOrder.indexOf(targetState);
 
               for (let i = 0; i < targetIdx; i++) {
-                current = await mgr2.advance(current.id);
+                if (current.state === 'awaiting_plan_approval') {
+                  current = await mgr2.approvePlan(current.id, operatorId);
+                } else {
+                  current = await mgr2.advance(current.id);
+                }
               }
 
               expect(current.state).toBe(targetState);
@@ -418,7 +440,11 @@ describe('Orchestration Session Manager Property Tests', () => {
             const session = await manager.createSession(intent, operatorId);
             let current = session;
             while (current.state !== 'completed' && current.state !== 'failed') {
-              current = await manager.advance(current.id);
+              if (current.state === 'awaiting_plan_approval') {
+                current = await manager.approvePlan(current.id, operatorId);
+              } else {
+                current = await manager.advance(current.id);
+              }
             }
 
             // Attempting to advance from a terminal state should throw.
@@ -447,7 +473,11 @@ describe('Orchestration Session Manager Property Tests', () => {
             const session = await manager.createSession(intent, operatorId);
             let current = session;
             while (current.state !== 'completed' && current.state !== 'failed') {
-              current = await manager.advance(current.id);
+              if (current.state === 'awaiting_plan_approval') {
+                current = await manager.approvePlan(current.id, operatorId);
+              } else {
+                current = await manager.advance(current.id);
+              }
             }
 
             // Attempting to cancel from a terminal state should throw.
@@ -460,7 +490,7 @@ describe('Orchestration Session Manager Property Tests', () => {
       );
     });
 
-    it('the normal lifecycle follows the exact sequence: intent_received → resolving_workspace → spawning_agent → planning_task → executing → completed', async () => {
+    it('the normal lifecycle follows the exact sequence: intent_received → resolving_workspace → spawning_agent → planning_task → awaiting_plan_approval → executing → completed', async () => {
       await fc.assert(
         fc.asyncProperty(
           arbitraryStructuredIntent().map((intent) => ({
@@ -477,7 +507,11 @@ describe('Orchestration Session Manager Property Tests', () => {
 
             let current = session;
             while (current.state !== 'completed' && current.state !== 'failed') {
-              current = await manager.advance(current.id);
+              if (current.state === 'awaiting_plan_approval') {
+                current = await manager.approvePlan(current.id, operatorId);
+              } else {
+                current = await manager.advance(current.id);
+              }
               states.push(current.state);
             }
 
@@ -487,6 +521,7 @@ describe('Orchestration Session Manager Property Tests', () => {
               'resolving_workspace',
               'spawning_agent',
               'planning_task',
+              'awaiting_plan_approval',
               'executing',
               'completed',
             ]);
@@ -524,7 +559,11 @@ describe('Orchestration Session Manager Property Tests', () => {
             const session = await manager.createSession(intent, operatorId);
             let current = session;
             while (current.state !== 'completed' && current.state !== 'failed') {
-              current = await manager.advance(current.id);
+              if (current.state === 'awaiting_plan_approval') {
+                current = await manager.approvePlan(current.id, operatorId);
+              } else {
+                current = await manager.advance(current.id);
+              }
             }
 
             // Get the history.
@@ -584,7 +623,11 @@ describe('Orchestration Session Manager Property Tests', () => {
             let current = session;
             for (let i = 0; i < advanceCount; i++) {
               if (current.state === 'completed' || current.state === 'failed') break;
-              current = await manager.advance(current.id);
+              if (current.state === 'awaiting_plan_approval') {
+                current = await manager.approvePlan(current.id, operatorId);
+              } else {
+                current = await manager.advance(current.id);
+              }
             }
 
             // Cancel if not already terminal.
@@ -641,7 +684,11 @@ describe('Orchestration Session Manager Property Tests', () => {
             // Advance to completion.
             let current = manager.getSession(session.id)!;
             while (current.state !== 'completed' && current.state !== 'failed') {
-              current = await manager.advance(current.id);
+              if (current.state === 'awaiting_plan_approval') {
+                current = await manager.approvePlan(current.id, operatorId);
+              } else {
+                current = await manager.advance(current.id);
+              }
             }
 
             // Get the history.
@@ -649,7 +696,7 @@ describe('Orchestration Session Manager Property Tests', () => {
 
             // Property assertions:
             // 1. History covers the full path including pending_approval.
-            expect(history.length).toBeGreaterThanOrEqual(6); // intent_received → pending_approval → resolving_workspace → spawning_agent → planning_task → executing → completed
+            expect(history.length).toBeGreaterThanOrEqual(7); // intent_received → pending_approval → resolving_workspace → spawning_agent → planning_task → awaiting_plan_approval → executing → completed
 
             // 2. The chain is continuous.
             for (let i = 1; i < history.length; i++) {
@@ -695,7 +742,11 @@ describe('Orchestration Session Manager Property Tests', () => {
             const session = await manager.createSession(intent, operatorId);
             let current = session;
             while (current.state !== 'completed' && current.state !== 'failed') {
-              current = await manager.advance(current.id);
+              if (current.state === 'awaiting_plan_approval') {
+                current = await manager.approvePlan(current.id, operatorId);
+              } else {
+                current = await manager.advance(current.id);
+              }
             }
 
             // Get the history.

@@ -162,6 +162,73 @@ export class TaskPlanner implements ITaskPlanner {
   }
 
   // ------------------------------------------------------------------
+  // ITaskPlanner — Plan regeneration
+  // ------------------------------------------------------------------
+
+  /**
+   * Regenerate a plan incorporating operator modification instructions.
+   *
+   * Uses the previous plan and modification context to produce a revised plan.
+   * Routes inference through the MCP Gateway (same pattern as generatePlan).
+   *
+   * Requirements: 2.3, 2.6, 7.3
+   */
+  async regeneratePlan(
+    context: PlanningContext,
+    previousPlan: GeneratedPlan,
+    modificationInstructions: string,
+  ): Promise<GeneratedPlan> {
+    const now = new Date();
+
+    // Build the prompt for plan regeneration
+    const prompt = this.buildRegenerationPrompt(context, previousPlan, modificationInstructions);
+
+    // Route inference through MCP Gateway
+    const result = await this.mcpGateway.executeOperation(
+      ORCHESTRATION_AGENT_ID,
+      ORCHESTRATION_LLM_SERVICE_ID,
+      'chat.completions',
+      {
+        model: this.orchestrationLlmConfig.model,
+        messages: [
+          {
+            role: 'system',
+            content: this.orchestrationLlmConfig.systemPrompt ?? this.getDefaultSystemPrompt(),
+          },
+          { role: 'user', content: prompt },
+        ],
+        temperature: this.orchestrationLlmConfig.temperature ?? 0.3,
+        max_tokens: this.orchestrationLlmConfig.maxTokens ?? 2048,
+      },
+    );
+
+    // Parse the LLM response into a GeneratedPlan
+    const plan = this.parsePlanFromResponse(result, context);
+
+    // Record the regeneration in the audit log
+    await this.auditLog.record({
+      sequenceNumber: 0,
+      timestamp: now,
+      operatorId: context.intent.sourceId,
+      eventType: 'coding_task',
+      operation: 'plan_regenerated',
+      resource: `intent:${context.intent.id}`,
+      details: {
+        intentId: context.intent.id,
+        action: context.intent.action,
+        repository: context.intent.repository,
+        stepCount: plan.steps.length,
+        reasoning: plan.reasoning,
+        estimatedDuration: plan.estimatedDuration,
+        modificationInstructions,
+        previousStepCount: previousPlan.steps.length,
+      },
+    });
+
+    return plan;
+  }
+
+  // ------------------------------------------------------------------
   // Private — Prompt construction
   // ------------------------------------------------------------------
 
@@ -237,6 +304,64 @@ Guidelines:
 - Order steps logically (setup → implementation → testing → cleanup)
 - Keep instructions specific and unambiguous
 - Reference the issue or PR content in step instructions when available`;
+
+    return prompt;
+  }
+
+  /**
+   * Build the user prompt for plan regeneration with modification instructions.
+   */
+  private buildRegenerationPrompt(
+    context: PlanningContext,
+    previousPlan: GeneratedPlan,
+    modificationInstructions: string,
+  ): string {
+    const { intent, workspace, agentCapabilities } = context;
+
+    let prompt = `Revise the following task plan based on the operator's modification instructions.
+
+## Original Intent
+- Action: ${intent.action}
+- Repository: ${intent.repository ?? 'not specified'}
+- Branch: ${intent.branch ?? 'not specified'}
+
+## Workspace
+- Repository URL: ${workspace.repositoryUrl}
+- Local Path: ${workspace.localPath}
+- Branch: ${workspace.branch}
+
+## Agent Capabilities
+- Languages: ${agentCapabilities.languages?.join(', ') ?? 'any'}
+- Frameworks: ${agentCapabilities.frameworks?.join(', ') ?? 'any'}
+- Tools: ${agentCapabilities.tools?.join(', ') ?? 'any'}
+
+## Previous Plan
+- Reasoning: ${previousPlan.reasoning}
+- Estimated Duration: ${previousPlan.estimatedDuration ?? 'not specified'}
+- Steps:
+`;
+
+    for (let i = 0; i < previousPlan.steps.length; i++) {
+      const step = previousPlan.steps[i];
+      prompt += `  ${i + 1}. [${step.executionMode}] ${step.instructions}\n`;
+    }
+
+    prompt += `
+## Operator Modification Instructions
+${modificationInstructions}
+
+## Instructions
+Respond with a JSON object containing the revised plan:
+- "steps": array of step objects, each with:
+  - "instructions": string (clear instructions for the coding agent)
+  - "executionMode": "agent" or "external-event"
+  - "trigger": object or null (for external-event steps)
+  - "filePaths": array of strings or null
+  - "memoryReferences": array of { "namespace": string, "key": string } or null
+- "reasoning": string (explain how you incorporated the modifications)
+- "estimatedDuration": string or null
+
+Incorporate the operator's modifications while maintaining the overall intent and logical step ordering.`;
 
     return prompt;
   }

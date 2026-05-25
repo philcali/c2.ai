@@ -66,9 +66,17 @@ export type OrchestrationState =
   | 'resolving_workspace'
   | 'spawning_agent'
   | 'planning_task'
+  | 'awaiting_plan_approval'
   | 'executing'
   | 'completed'
   | 'failed';
+
+export interface PlanRevisionEntry {
+  planId: string;
+  plan: GeneratedPlan;
+  modificationInstructions?: string;
+  generatedAt: Date;
+}
 
 export interface OrchestrationSession {
   id: string;
@@ -83,6 +91,15 @@ export interface OrchestrationSession {
   createdAt: Date;
   updatedAt: Date;
   completedAt?: Date;
+
+  /** The current generated plan (set when entering awaiting_plan_approval) */
+  currentPlan?: GeneratedPlan & { planId: string };
+
+  /** Revision history: all plans generated for this session, in order */
+  planRevisionHistory?: PlanRevisionEntry[];
+
+  /** Timestamp when the session entered awaiting_plan_approval (for timeout tracking) */
+  planEnteredAt?: Date;
 }
 
 export interface OrchestrationEvent {
@@ -138,4 +155,9 @@ export interface SpawnResult {
   agentId: string;
   sessionId: string;
   reused: boolean;
+}
+
+export interface CommandCenterConfig {
+  /** Plan review timeout in milliseconds (default: 1800000 = 30 minutes) */
+  planReviewTimeoutMs?: number;
 }

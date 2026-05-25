@@ -934,8 +934,14 @@ describe('Layer 2: Full operator intent flow', () => {
     expect(afterPlanning.agentId).toBeDefined();
     expect(afterPlanning.agentSessionId).toBeDefined();
 
-    // Step 6: Advance → executing (task plan submitted)
-    const afterExecuting = await sub.orchestrationSessionManager.advance(session.id);
+    // Step 6: Advance → awaiting_plan_approval (plan generated, awaiting review)
+    const afterPlanReview = await sub.orchestrationSessionManager.advance(session.id);
+    expect(afterPlanReview.state).toBe('awaiting_plan_approval');
+    expect(afterPlanReview.currentPlan).toBeDefined();
+    expect(afterPlanReview.currentPlan!.planId).toBeDefined();
+
+    // Step 6b: Approve plan → executing (task plan submitted)
+    const afterExecuting = await sub.orchestrationSessionManager.approvePlan(session.id, 'operator-1');
     expect(afterExecuting.state).toBe('executing');
     expect(afterExecuting.codingTaskId).toBeDefined();
 
@@ -964,6 +970,7 @@ describe('Layer 2: Full operator intent flow', () => {
     expect(states).toContain('resolving_workspace');
     expect(states).toContain('spawning_agent');
     expect(states).toContain('planning_task');
+    expect(states).toContain('awaiting_plan_approval');
     expect(states).toContain('executing');
     expect(states).toContain('completed');
   });
@@ -980,7 +987,8 @@ describe('Layer 2: Full operator intent flow', () => {
     await sub.orchestrationSessionManager.advance(session.id); // → resolving_workspace
     await sub.orchestrationSessionManager.advance(session.id); // → spawning_agent
     await sub.orchestrationSessionManager.advance(session.id); // → planning_task
-    await sub.orchestrationSessionManager.advance(session.id); // → executing
+    await sub.orchestrationSessionManager.advance(session.id); // → awaiting_plan_approval
+    await sub.orchestrationSessionManager.approvePlan(session.id, 'operator-1'); // → executing
     await sub.orchestrationSessionManager.advance(session.id); // → completed
 
     // Verify audit log has entries from multiple subsystems

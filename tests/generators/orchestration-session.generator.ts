@@ -6,6 +6,7 @@ import type {
 } from '../../src/interfaces/orchestration-config.js';
 import { arbitraryStructuredIntent } from './structured-intent.generator.js';
 import { arbitraryWorkspaceContext } from './workspace-context.generator.js';
+import { arbitraryCurrentPlan, arbitraryPlanRevisionHistory } from './plan.generator.js';
 
 /** Generate a valid OrchestrationState */
 export const arbitraryOrchestrationState = (): fc.Arbitrary<OrchestrationState> =>
@@ -15,6 +16,7 @@ export const arbitraryOrchestrationState = (): fc.Arbitrary<OrchestrationState> 
     'resolving_workspace',
     'spawning_agent',
     'planning_task',
+    'awaiting_plan_approval',
     'executing',
     'completed',
     'failed',
@@ -24,16 +26,23 @@ export const arbitraryOrchestrationState = (): fc.Arbitrary<OrchestrationState> 
 export const arbitraryOrchestrationSession = (): fc.Arbitrary<OrchestrationSession> =>
   arbitraryOrchestrationState().chain(state => {
     const hasWorkspace = [
-      'spawning_agent', 'planning_task', 'executing', 'completed', 'failed',
+      'spawning_agent', 'planning_task', 'awaiting_plan_approval', 'executing', 'completed', 'failed',
     ].includes(state);
     const hasAgent = [
-      'planning_task', 'executing', 'completed',
+      'planning_task', 'awaiting_plan_approval', 'executing', 'completed',
     ].includes(state);
     const hasCodingTask = [
       'executing', 'completed',
     ].includes(state);
     const hasFailed = state === 'failed';
     const hasCompleted = state === 'completed';
+
+    // Plan-related fields are present when the session has reached or passed the planning phase
+    const hasPlan = [
+      'awaiting_plan_approval', 'executing', 'completed', 'failed',
+    ].includes(state);
+    // planEnteredAt is set when the session is in or has been in awaiting_plan_approval
+    const hasPlanEnteredAt = state === 'awaiting_plan_approval';
 
     return fc.record({
       id: fc.uuid(),
@@ -58,6 +67,15 @@ export const arbitraryOrchestrationSession = (): fc.Arbitrary<OrchestrationSessi
       createdAt: fc.date({ min: new Date('2020-01-01'), max: new Date('2030-12-31') }),
       updatedAt: fc.date({ min: new Date('2020-01-01'), max: new Date('2030-12-31') }),
       completedAt: hasCompleted
+        ? fc.date({ min: new Date('2020-01-01'), max: new Date('2030-12-31') }).map(d => d as Date | undefined)
+        : fc.constant(undefined),
+      currentPlan: hasPlan
+        ? fc.option(arbitraryCurrentPlan(), { nil: undefined })
+        : fc.constant(undefined),
+      planRevisionHistory: hasPlan
+        ? fc.option(arbitraryPlanRevisionHistory(), { nil: undefined })
+        : fc.constant(undefined),
+      planEnteredAt: hasPlanEnteredAt
         ? fc.date({ min: new Date('2020-01-01'), max: new Date('2030-12-31') }).map(d => d as Date | undefined)
         : fc.constant(undefined),
     });
