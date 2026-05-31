@@ -1,0 +1,78 @@
+#!/usr/bin/env node
+
+/**
+ * c2.ai — Unified entry point for C2 AI Command Center.
+ *
+ * Starts both the CommandCenter backend and Vite frontend from a single command.
+ * Reads configuration from c2.config.json, initializes token-based authentication,
+ * and manages the lifecycle of both processes.
+ */
+
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { loadConfig } from '../dist/src/launcher/config-loader.js';
+import { TokenManager } from '../dist/src/launcher/token-manager.js';
+import { Launcher } from '../dist/src/launcher/launcher.js';
+
+// Resolve project root (one level up from bin/)
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const projectRoot = resolve(__dirname, '..');
+
+// ---------------------------------------------------------------------------
+// 1. Load configuration
+// ---------------------------------------------------------------------------
+
+let config;
+try {
+  config = loadConfig(resolve(projectRoot, 'c2.config.json'));
+} catch (err) {
+  console.error(`[c2.ai] Configuration error: ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
+}
+
+// ---------------------------------------------------------------------------
+// 2. Initialize TokenManager
+// ---------------------------------------------------------------------------
+
+const tokenManager = new TokenManager(config.auth.tokenExpirationSeconds);
+tokenManager.startCleanup();
+
+// ---------------------------------------------------------------------------
+// 3. Generate initial auth token and print it
+// ---------------------------------------------------------------------------
+
+const { token, expiresAt } = tokenManager.generateToken('admin', ['admin']);
+const expiresAtDate = new Date(expiresAt).toISOString();
+console.log(`[c2.ai] Initial auth token generated (expires ${expiresAtDate}):`);
+console.log(`  ${token}\n`);
+
+// ---------------------------------------------------------------------------
+// 4. Create and start the Launcher
+// ---------------------------------------------------------------------------
+
+const launcher = new Launcher({
+  config,
+  projectRoot,
+  tokenManager,
+  initialToken: { token, expiresAt },
+});
+
+try {
+  await launcher.start();
+} catch (err) {
+  console.error(`[c2.ai] Startup failed: ${err instanceof Error ? err.message : String(err)}`);
+  tokenManager.clearAll();
+  process.exit(1);
+}
+
+// ---------------------------------------------------------------------------
+// 5. Register SIGINT handler for graceful shutdown
+// ---------------------------------------------------------------------------
+
+process.on('SIGINT', async () => {
+  console.log('\n[c2.ai] Shutting down...');
+  await launcher.shutdown();
+  process.exit(0);
+});

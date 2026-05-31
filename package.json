@@ -3,7 +3,11 @@
   "version": "0.1.0",
   "description": "C2 AI Command Center — orchestrates multiple AI agent sessions with strict security isolation, shared memory, inter-agent communication, and centralized policy enforcement",
   "type": "module",
+  "bin": {
+    "c2.ai": "./bin/c2.ai"
+  },
   "scripts": {
+    "start": "node bin/c2.ai",
     "build": "tsc",
     "test": "vitest --run",
     "test:watch": "vitest",
